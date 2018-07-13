@@ -1,0 +1,10 @@
+.DS_Store
+.idea/
+checkpoints*/
+pretrained_models/*.pth
+results/
+venv/
+*.png
+__pycache__
+*.pyc
+*~
