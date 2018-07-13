@@ -1,7 +1,7 @@
 import torchvision
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader,Dataset
+from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
 import torchvision.utils
 import numpy as np
@@ -14,44 +14,54 @@ import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
 import os
+import argparse
 
 
-def imshow(img, text=None,should_save=False):
-    npimg = img.numpy()
-    plt.axis("off")
-    if text:
-        plt.text(75, 8, text, style='italic', fontweight='bold',
-                 bbox={'facecolor': 'white', 'alpha': 0.8, 'pad': 10})
-    plt.imshow(np.transpose(npimg, (1, 2, 0)))
-    plt.show()
+class Options():
+    def initialize(self, parser):
+        parser.add_argument('--mode', type=str, default='train', help='train | test | visualize')
+        parser.add_argument('--name', type=str, default='exp', help='experiment name')
+        parser.add_argument('--dataroot', required=True, help='path to images')
+        parser.add_argument('--datafile', type=str, default='', help='text file listing images')
+        parser.add_argument('--pretrained_model_dir', type=str, default='pretrained_models', help='pretrained models')
+        parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
+        parser.add_argument('--save_epoch_freq', type=int, default=10, help='frequency of saving checkpoints')
+        parser.add_argument('--num_workers', type=int, default=8, help='number of workers for data loader')
+        parser.add_argument('--init_type', type=str, default='normal', help='network initialization [normal|xavier|kaiming|orthogonal]')
+        parser.add_argument('--num_classes', type=int, default=10, help='number of classes')
+        parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')
+        parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+        parser.add_argument('--lr', type=float, default=0.0002, help='learning rate')
+        parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
+        return parser
 
+    def get_options(self):
+        parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        self.parser = self.initialize(parser)
+        self.opt = self.parser.parse_args()
+        self.print_options(self.opt)
+        return self.opt
+    
+    def print_options(self, opt):
+        message = ''
+        message += '--------------- Options -----------------\n'
+        for k, v in sorted(vars(opt).items()):
+            comment = ''
+            default = self.parser.get_default(k)
+            if v != default:
+                comment = '\t[default: %s]' % str(default)
+            message += '{:>25}: {:<30}{}\n'.format(str(k), str(v), comment)
+        message += '----------------- End -------------------'
+        print(message)
 
-def show_plot(iteration, loss):
-    plt.plot(iteration, loss)
-    plt.show()
-
-
-class Config():
-    training_dir = "/data/home/ligonghan/Research/Datasets/UTKFace"
-    testing_dir = "/media/ligong/Toshiba/Datasets/CACD/CACD_cropped_400/test"
-    training_source_file = "train.txt"
-    alexnet_pretrained_model_path = "pretrained_models/alexnet-owt-4df8aa71.pth"
-    checkpoint_dir = "./checkpoints"
-    save_epoch_freq = 10
-    train_batch_size = 64
-    train_number_epochs = 100
-    num_workers = 8
-    init_type = 'normal'
-    gpu_ids = [0]
-
-
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        m.weight.data.normal_(0.0, 0.02)
-    elif classname.find('BatchNorm2d') != -1:
-        m.weight.data.normal_(1.0, 0.02)
-        m.bias.data.fill_(0)
+        # save to the disk
+        expr_dir = os.path.join(opt.checkpoint_dir, opt.name)
+        if not os.path.exists(expr_dir):
+            os.makedirs(expr_dir)
+        file_name = os.path.join(expr_dir, 'opt.txt')
+        with open(file_name, 'wt') as opt_file:
+            opt_file.write(message)
+            opt_file.write('\n')
 
 
 class SiameseNetworkDataset(Dataset):
@@ -202,67 +212,101 @@ class ContrastiveLoss(torch.nn.Module):
         return loss_contrastive
 
 
-def parse_label(names):
+def imshow(img, text=None,should_save=False):
+    npimg = img.numpy()
+    plt.axis("off")
+    if text:
+        plt.text(75, 8, text, style='italic', fontweight='bold',
+                 bbox={'facecolor': 'white', 'alpha': 0.8, 'pad': 10})
+    plt.imshow(np.transpose(npimg, (1, 2, 0)))
+    plt.show()
+
+
+def show_plot(iteration, loss):
+    plt.plot(iteration, loss)
+    plt.show()
+
+
+def weights_init(m):
+    classname = m.__class__.__name__
+    if classname.find('Conv') != -1:
+        m.weight.data.normal_(0.0, 0.02)
+    elif classname.find('BatchNorm2d') != -1:
+        m.weight.data.normal_(1.0, 0.02)
+        m.bias.data.fill_(0)
+
+
+def parse_label(names, num_classes=10):
     labels = []
     for name in names:
-        ss = name.split('_')
-        # l = (int(ss[0])-1) // 10 - 1
-        # l = max(0, min(4, l))
-        l = (int(ss[0])-1) // 10
-        l = max(0, min(9, l))
+        s = name.split('_')
+        l = (int(s[0])-1) // 10
+        l = max(0, min(num_classes-1, l))
         labels.append(l)
     return labels
 
 
-siamese_dataset = SingleImageDataset(Config.training_dir, Config.training_source_file,
-                                     transform=transforms.Compose([transforms.Resize((224, 224)),
-                                                                   transforms.ToTensor()]))
+def get_dataloader(opt):
+    dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()]))
+    dataloader = DataLoader(dataset, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
+    return dataloader
 
-train_dataloader = DataLoader(siamese_dataset,
-                              shuffle=True,
-                              num_workers=Config.num_workers,
-                              batch_size=Config.train_batch_size)
-net = AlexNet2(10)
-net.cnn1.load_state_dict(torch.load(Config.alexnet_pretrained_model_path), strict=False)
-net.fc1.apply(weights_init)
-net.cuda()
-criterion = torch.nn.CrossEntropyLoss()
-optimizer = optim.Adam(net.parameters(), lr=0.0005)
 
-counter = []
-loss_history = []
-iteration_number = 0
+def get_model(opt):
+    net = AlexNet2(10)
+    net.cnn1.load_state_dict(torch.load(os.path.join(opt.pretrained_model_dir, 'alexnet.pth')), strict=False)
+    net.fc1.apply(weights_init)
+    net.cuda()
+    return net
 
-if not os.path.exists(Config.checkpoint_dir):
-    os.makedirs(Config.checkpoint_dir)
 
-for epoch in range(0, Config.train_number_epochs):
-    # pred = []
-    # target = []
-    # acc = 0
-    for i, data in enumerate(train_dataloader, 0):
-        img0, path0 = data
-        label = parse_label(path0)
-        label = torch.LongTensor(label)
-        img0, label = img0.cuda(), label.cuda()
-        optimizer.zero_grad()
-        output = net.forward(img0)
-        loss = criterion(output, label)
-        loss.backward()
-        optimizer.step()
-        if i % 10 == 0:
-            print("Epoch number {}\n Current loss {}\n".format(epoch, loss.item()))
-            iteration_number += 10
-            counter.append(iteration_number)
-            loss_history.append(loss.item())
-    if epoch % Config.save_epoch_freq == 0:
-        torch.save({'state_dict': net.state_dict(), 'epoch': epoch}, os.path.join(Config.checkpoint_dir, 'checkpoint_{}.pth.tar'.format(epoch)))
+def train(opt, net, dataloader):
+    opt.save_dir = os.path.join(opt.checkpoint_dir, opt.name)
+    if not os.path.exists(opt.save_dir):
+        os.makedirs(opt.save_dir)
+    criterion = torch.nn.CrossEntropyLoss()
+    optimizer = optim.Adam(net.parameters(), lr=opt.lr)
 
-# save model
-torch.save({'state_dict': net.state_dict(), 'epoch': epoch}, os.path.join(Config.checkpoint_dir, 'checkpoint_latest.pth.tar'))
+    counter = []
+    loss_history = []
+    iteration_number = 0
 
-with open(os.path.join(Config.checkpoint_dir, 'log.txt'), 'w') as f:
-    for loss in loss_history:
-        f.write(str(loss)+'\n')
+    for epoch in range(0, opt.num_epochs):
+        for i, data in enumerate(dataloader, 0):
+            img0, path0 = data
+            label = parse_label(path0)
+            label = torch.LongTensor(label)
+            img0, label = img0.cuda(), label.cuda()
+            optimizer.zero_grad()
+            output = net.forward(img0)
+            loss = criterion(output, label)
+            loss.backward()
+            optimizer.step()
+            if i % 10 == 0:
+                print("Epoch number {}\n Current loss {}\n".format(epoch, loss.item()))
+                iteration_number += 10
+                counter.append(iteration_number)
+                loss_history.append(loss.item())
+        if epoch % opt.save_epoch_freq == 0:
+            torch.save(net.state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
 
-# show_plot(counter, loss_history)
+    # save model
+    torch.save(net.state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
+
+    with open(os.path.join(opt.save_dir, 'log.txt'), 'w') as f:
+        for loss in loss_history:
+            f.write(str(loss)+'\n')
+    # show_plot(counter, loss_history)
+
+
+if __name__=='__main__':
+    opt = Options().get_options()
+
+    # Get dataloader
+    dataloader = get_dataloader(opt)
+
+    # Get model
+    model = get_model(opt)
+
+    if opt.mode == 'train':
+        train(opt, model, dataloader)
