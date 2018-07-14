@@ -9,7 +9,7 @@ def parse_age(fname, max_age=9, min_age=0):
     return l
 
 random.seed(0)
-src = '/data/home/ligonghan/Research/Datasets/UTKFace'
+src = '/media/ligong/Toshiba/Datasets/UTKFace'
 
 cnt = {}
 name_list = {}
@@ -38,11 +38,10 @@ for l in range(10):
     test_list[l] = name_list[l][:test_num[l]]
     train_list[l] = name_list[l][test_num[l]:]
 
-with open('train.txt', 'w') as f:
+with open('../data/train.txt', 'w') as f:
     for name in list(chain.from_iterable(train_list.values())):
         f.write(name+'\n')
 
-with open('test.txt', 'w') as f:
+with open('../data/test.txt', 'w') as f:
     for name in list(chain.from_iterable(test_list.values())):
         f.write(name+'\n')
-
