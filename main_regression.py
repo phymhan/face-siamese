@@ -40,6 +40,7 @@ class Options():
         parser.add_argument('--n_layers', type=int, default=3, help='only used if which_model==n_layers')
         parser.add_argument('--nf', type=int, default=64, help='# of filters in first conv layer')
         parser.add_argument('--use_avg_pooling', action='store_true', help='use average pooling after feature extraction')
+        parser.add_argument('--loadSize', type=int, default=224, help='scale images to this size')
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         return parser
 
@@ -291,15 +292,19 @@ class NLayerClassifier(nn.Module):
             nn.LeakyReLU(0.2, True)
         ]
 
-        sequence += [
-            nn.Conv2d(nf * nf_mult, num_classes, kernel_size=kw, stride=1, padding=padw),
+        self.features = nn.Sequential(*sequence)
+
+        sequence = [
+            nn.Conv2d(nf * nf_mult, num_classes, kernel_size=1, stride=1, padding=0),
         ]
 
-        self.model = nn.Sequential(*sequence)
+        self.classifier = nn.Sequential(*sequence)
 
     def forward(self, x):
-        x = self.model(x)
+        x = self.features(x)
+        # print(x.size())
         y = nn.AvgPool2d(x.size(2))(x)  # x.size(2)==x.size(3)
+        y = self.classifier(y)
         return y.view(y.size(0), -1)
 
 
@@ -342,6 +347,8 @@ def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
         m.weight.data.normal_(0.0, 0.02)
+    elif classname.find('Linear') != -1:
+        m.weight.data.normal_(0.0, 0.02)
     elif classname.find('BatchNorm2d') != -1:
         m.weight.data.normal_(1.0, 0.02)
         m.bias.data.fill_(0)
@@ -368,7 +375,7 @@ def get_model(opt):
     elif opt.which_model == 'alexnet_lite':
         net = AlexNetLite(opt.num_classes, opt.use_avg_pooling)
     elif opt.which_model == 'n_layers':
-        net = NLayerClassifier()
+        net = NLayerClassifier(num_classes=opt.num_classes, nf=opt.nf, n_layers=opt.n_layers)
     else:
         raise NotImplementedError('Model [%s] is not implemented.' % opt.which_model)
     
@@ -384,6 +391,7 @@ def get_model(opt):
                 net.load_state_dict(weights, strict=False)
             elif opt.which_model == 'alexnet_lite':
                 net.features.load_state_dict(weights, strict=False)
+                #net.fc.apply(weights_init)
     else:
         net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))))
     
@@ -494,19 +502,19 @@ if __name__=='__main__':
 
     if opt.mode == 'train':
         # get dataloader
-        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()]))
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor()]))
         dataloader = DataLoader(dataset, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
         # train
         train(opt, net, dataloader)
     elif opt.mode == 'test':
         # get dataloader
-        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()]))
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor()]))
         dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         # test
         test(opt, net, dataloader)
     elif opt.mode == 'visualize':
         # get dataloader
-        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor()]))
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor()]))
         dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         # test
         visualize(opt, net, dataloader)
