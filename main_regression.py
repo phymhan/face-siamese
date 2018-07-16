@@ -394,6 +394,7 @@ def get_model(opt):
                 #net.fc.apply(weights_init)
     else:
         net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))))
+        net.eval()
     
     if opt.use_gpu:
         net.cuda()
@@ -502,19 +503,19 @@ if __name__=='__main__':
 
     if opt.mode == 'train':
         # get dataloader
-        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor()]))
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
         dataloader = DataLoader(dataset, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
         # train
         train(opt, net, dataloader)
     elif opt.mode == 'test':
         # get dataloader
-        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor()]))
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
         dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         # test
         test(opt, net, dataloader)
     elif opt.mode == 'visualize':
         # get dataloader
-        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor()]))
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
         dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         # test
         visualize(opt, net, dataloader)
