@@ -390,7 +390,8 @@ def get_model(opt):
                 del weights['classifier.6.bias']
                 net.load_state_dict(weights, strict=False)
             elif opt.which_model == 'alexnet_lite':
-                net.features.load_state_dict(weights, strict=False)
+                # do not use net.features.load_state_dict()
+                net.load_state_dict(weights, strict=False)
                 #net.fc.apply(weights_init)
     else:
         net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))))
