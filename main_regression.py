@@ -39,9 +39,16 @@ class Options():
         parser.add_argument('--which_model', type=str, default='alexnet', help='which model')
         parser.add_argument('--n_layers', type=int, default=3, help='only used if which_model==n_layers')
         parser.add_argument('--nf', type=int, default=64, help='# of filters in first conv layer')
-        parser.add_argument('--use_avg_pooling', action='store_true', help='use average pooling after feature extraction')
+        parser.add_argument('--pooling', type=str, default='', help='empty: no pooling layer, max: MaxPool, avg: AvgPool')
+        # parser.add_argument('--use_avg_pooling', action='store_true', help='use average pooling after feature extraction')
+        # parser.add_argument('--use_max_pooling', action='store_true', help='use max pooling after feature extraction')
         parser.add_argument('--loadSize', type=int, default=224, help='scale images to this size')
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
+        parser.add_argument('--age_bins', nargs='+', type=int, default=[1, 11, 21, 31, 41, 51, 61, 71, 81, 91], help='list of bins, the (i+1)-th group is in the range [age_binranges[i], age_binranges[i+1]), e.g. [1, 11, 21, ..., 101], the 1-st group is [1, 10], the 9-th [91, 100], however, the 10-th [101, +inf)')
+        parser.add_argument('--weight', nargs='+', type=float, default=[], help='weights for CE')
+        parser.add_argument('--dropout_p', type=float, default=0.5, help='dropout p')
+        parser.add_argument('--finetune_fc_only', action='store_true', help='fix feature extraction weights and finetune fc layers only, if True')
+
         return parser
 
     def get_options(self):
@@ -49,6 +56,12 @@ class Options():
         self.parser = self.initialize(parser)
         self.opt = self.parser.parse_args()
         self.opt.use_gpu = len(self.opt.gpu_ids) > 0 and torch.cuda.is_available()
+        assert(self.opt.num_classes == len(self.opt.age_bins))
+        # set age_bins
+        self.opt.age_bins_with_inf = self.opt.age_bins + [float('inf')]
+        # weight
+        if self.opt.weight:
+            assert(len(self.opt.weight) == self.opt.num_classes)
         self.print_options(self.opt)
         return self.opt
     
@@ -103,13 +116,11 @@ class SingleImageDataset(Dataset):
     def __init__(self, rootdir, source_file, transform=None):
         self.rootdir = rootdir
         self.transform = transform
-        with open(source_file, 'r') as f:
-            self.source_file = f.readlines()
-        # if os.path.isdir(rootdir):
-        #     self.source_file = os.listdir(rootdir)
-        # else:
-        #     with open(rootdir, 'r') as f:
-        #         self.source_file = f.readlines()
+        if source_file:
+            with open(source_file, 'r') as f:
+                self.source_file = f.readlines()
+        else:
+            self.source_file = os.listdir(rootdir)
 
     def __getitem__(self, index):
         imgA = Image.open(os.path.join(self.rootdir, self.source_file[index].rstrip('\n'))).convert('RGB')
@@ -184,10 +195,23 @@ class AlexNet(nn.Module):
         x = x.view(x.size(0), 256 * 6 * 6)
         x = self.classifier(x)
         return x
+    
+    def init_weights(self, state_dict):
+        if isinstance(state_dict, str):
+            state_dict = torch.load(state_dict)
+        if 'classifier.6.weight' in state_dict:
+            del state_dict['classifier.6.weight']
+        if 'classifier.6.bias' in state_dict:
+            del state_dict['classifier.6.bias']
+        self.load_state_dict(state_dict, strict=False)
+    
+    def get_finetune_parameters(self):
+        # used when opt.finetune_fc_only is True
+        return self.classifier.parameters()
 
 
 class AlexNetFeatures(nn.Module):
-    def __init__(self, use_avg_pooling=True):
+    def __init__(self, pooling='avg'):
         super(AlexNetFeatures, self).__init__()
         sequence = [
             nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
@@ -204,21 +228,28 @@ class AlexNetFeatures(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=3, stride=2),
         ]
-        if use_avg_pooling:
+        if pooling == 'avg':
             sequence += [nn.AvgPool2d(kernel_size=6)]
+        elif pooling == 'max':
+            sequence += [nn.MaxPool2d(kernel_size=6)]
         self.features = nn.Sequential(*sequence)
 
     def forward(self, x):
         x = self.features(x)
         return x
+    
+    def init_weights(self, state_dict):
+        if isinstance(state_dict, str):
+            state_dict = torch.load(state_dict)
+        self.load_state_dict(state_dict, strict=False)
 
 
 # a lighter alexnet, with fewer params in fc layers
 class AlexNetLite(nn.Module):
-    def __init__(self, num_classes=10, use_avg_pooling=False):
+    def __init__(self, num_classes=10, pooling='avg', dropout=0.5):
         super(AlexNetLite, self).__init__()
-        self.use_avg_pooling = use_avg_pooling
-        if use_avg_pooling:
+        self.pooling = pooling
+        if pooling:
             fw = 1
         else:
             fw = 6
@@ -238,20 +269,63 @@ class AlexNetLite(nn.Module):
             nn.MaxPool2d(kernel_size=3, stride=2),
         )
         self.fc = nn.Sequential(
-            nn.Dropout(),
-            nn.Linear(256 * fw * fw, 500),
+            nn.Dropout(dropout),
+            nn.Linear(256 * fw * fw, 64),
             nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(500, num_classes),
+            nn.Dropout(dropout),
+            nn.Linear(64, num_classes),
         )
 
     def forward(self, x):
         x = self.features(x)
-        if self.use_avg_pooling:
+        if self.pooling == 'avg':
             x = nn.AvgPool2d(6)(x)
+        elif self.pooling == 'max':
+            x = nn.MaxPool2d(6)(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
+    
+    def init_weights(self, state_dict):
+        if isinstance(state_dict, str):
+            state_dict = torch.load(state_dict)
+        # do not use self.features.load_state_dict() which will load nothing
+        self.load_state_dict(state_dict, strict=False)
+    
+    def get_finetune_parameters(self):
+        # used when opt.finetune_fc_only is True
+        return self.fc.parameters()
+
+
+class ResNet(nn.Module):
+    def __init__(self, num_classes, which_model):
+        super(ResNet, self).__init__()
+        model = None
+        if which_model == 'resnet18':
+            from torchvision.models import resnet18
+            model = resnet18(False)
+            model.fc = nn.Linear(512 * 1, num_classes)
+        elif which_model == 'resnet34':
+            from torchvision.models import resnet34
+            model = resnet34(False)
+            model.fc = nn.Linear(512 * 1, num_classes)
+        elif which_model == 'resnet50':
+            from torchvision.models import resnet50
+            model = resnet50(False)
+            model.fc = nn.Linear(512 * 4, num_classes)
+        self.model = model
+    
+    def forward(self, x):
+        return self.model(x)
+    
+    def init_weights(self, state_dict):
+        if isinstance(state_dict, str):
+            state_dict = torch.load(state_dict)
+            if 'fc.weight' in state_dict:
+                del state_dict['fc.weight']
+            if 'fc.bias' in state_dict:
+                del state_dict['fc.bias']
+        self.model.load_state_dict(state_dict, strict=False)
 
 
 # borrowed from NLayerDiscriminator in pix2pix-cyclegan
@@ -307,6 +381,9 @@ class NLayerClassifier(nn.Module):
         y = self.classifier(y)
         return y.view(y.size(0), -1)
 
+    # def init_weights(self, _):
+    #     return None
+
 
 class ContrastiveLoss(torch.nn.Module):
     """
@@ -354,14 +431,14 @@ def weights_init(m):
         m.bias.data.fill_(0)
 
 
-def parse_label(names, num_classes=10):
-    labels = []
-    for name in names:
-        s = name.split('_')
-        l = (int(s[0])-1) // 10
-        l = max(0, min(num_classes-1, l))
-        labels.append(l)
-    return labels
+def parse_age_label(fname, binranges):
+    strlist = fname.split('_')
+    age = int(strlist[0])
+    l = None
+    for l in range(len(binranges)-1):
+        if (age >= binranges[l]) and (age < binranges[l+1]):
+            break
+    return l
 
 
 ###############################################################################
@@ -373,7 +450,9 @@ def get_model(opt):
     if opt.which_model == 'alexnet':
         net = AlexNet(opt.num_classes)
     elif opt.which_model == 'alexnet_lite':
-        net = AlexNetLite(opt.num_classes, opt.use_avg_pooling)
+        net = AlexNetLite(opt.num_classes, opt.pooling, opt.dropout_p)
+    elif 'resnet' in opt.which_model:
+        net = ResNet(opt.num_classes, opt.which_model)
     elif opt.which_model == 'n_layers':
         net = NLayerClassifier(num_classes=opt.num_classes, nf=opt.nf, n_layers=opt.n_layers)
     else:
@@ -383,16 +462,10 @@ def get_model(opt):
     if opt.mode == 'train':
         net.apply(weights_init)
         if opt.use_pretrained_model:
-            weights = torch.load(opt.pretrained_model_path)
-            if opt.which_model == 'alexnet':
-                # load weights except for the last layer of classifier
-                del weights['classifier.6.weight']
-                del weights['classifier.6.bias']
-                net.load_state_dict(weights, strict=False)
-            elif opt.which_model == 'alexnet_lite':
-                # do not use net.features.load_state_dict()
-                net.load_state_dict(weights, strict=False)
-                #net.fc.apply(weights_init)
+            if isinstance(net, torch.nn.DataParallel):
+                net.module.init_weights(opt.pretrained_model_path)
+            else:
+                net.init_weights(opt.pretrained_model_path)
     else:
         net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))))
         net.eval()
@@ -404,11 +477,24 @@ def get_model(opt):
 
 # Routines for training
 def train(opt, net, dataloader):
+    if len(opt.weight):
+        opt.weight = torch.Tensor(opt.weight)
+        if opt.use_gpu:
+            opt.weight = opt.weight.cuda()
+        criterion = torch.nn.CrossEntropyLoss(weight=opt.weight)
+    else:
+        criterion = torch.nn.CrossEntropyLoss()
     opt.save_dir = os.path.join(opt.checkpoint_dir, opt.name)
     if not os.path.exists(opt.save_dir):
         os.makedirs(opt.save_dir)
-    criterion = torch.nn.CrossEntropyLoss()
-    optimizer = optim.Adam(net.parameters(), lr=opt.lr)
+    if opt.finetune_fc_only:
+        if isinstance(net, nn.DataParallel):
+            param = net.module.get_finetune_parameters()
+        else:
+            param = net.get_finetune_parameters()
+    else:
+        param = net.parameters()
+    optimizer = optim.Adam(param, lr=opt.lr)
 
     counter = []
     loss_history = []
@@ -417,9 +503,10 @@ def train(opt, net, dataloader):
     for epoch in range(1, opt.num_epochs+1):
         for i, data in enumerate(dataloader, 0):
             img0, path0 = data
-            label = parse_label(path0)
+            label = [parse_age_label(name, opt.age_bins_with_inf) for name in path0]
             label = torch.LongTensor(label)
-            img0, label = img0.cuda(), label.cuda()
+            if opt.use_gpu:
+                img0, label = img0.cuda(), label.cuda()
             optimizer.zero_grad()
             output = net.forward(img0)
             loss = criterion(output, label)
@@ -449,9 +536,10 @@ def test(opt, net, dataloader):
     acc = 0
     for i, data in enumerate(dataloader, 0):
         img0, path0 = data
-        label = parse_label(path0)
+        label = [parse_age_label(name, opt.age_bins_with_inf) for name in path0]
         label = torch.LongTensor(label)
-        img0, label = img0.cuda(), label.cuda()
+        if opt.use_gpu:
+            img0, label = img0.cuda(), label.cuda()
         output = net.forward(img0)
         target.append(label.cpu().detach().numpy().squeeze())
         pred.append(output.cpu().detach().numpy().squeeze().argmax())
@@ -467,12 +555,14 @@ def test(opt, net, dataloader):
 def visualize(opt, net, dataloader):
     features = []
     labels = []
-    for i, data in enumerate(dataloader, 0):
+    for _, data in enumerate(dataloader, 0):
         img0, path0 = data
-        feature = net.get_feature(img0.cuda())
+        if opt.use_gpu:
+            img0 = img0.cuda()
+        feature = net.get_feature(img0)
         feature = feature.cpu().detach().numpy()
         features.append(feature.reshape([1, 2]))
-        labels.append(parse_label(path0[0]))
+        labels.append(parse_age_label(path0[0], opt.age_bins_with_inf))
         # np.save('features/%s' % (path0[0].replace('.jpg', '.npy')), feature)
         print('--> %s' % path0[0])
 
@@ -493,7 +583,6 @@ def visualize(opt, net, dataloader):
 ###############################################################################
 # main()
 ###############################################################################
-# TODO: use gpu
 # TODO: set random seed
 
 if __name__=='__main__':
