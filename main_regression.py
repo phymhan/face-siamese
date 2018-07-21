@@ -132,32 +132,6 @@ class SingleImageDataset(Dataset):
         return len(self.source_file)
 
 
-class SiameseNetwork(nn.Module):
-    def __init__(self):
-        super(SiameseNetwork, self).__init__()
-        self.cnn1 = AlexNet(num_classes=3)
-        self.fc1 = nn.Sequential(
-            nn.Linear(256 * 1 * 1 * 2, 500),
-            nn.ReLU(inplace=True),
-            nn.Linear(500, 500),
-            nn.ReLU(inplace=True),
-            nn.Linear(500, 3),
-        )
-
-    def forward_once(self, x):
-        output = self.cnn1.forward(x)
-        output = nn.AvgPool2d(6)(output)
-        output = output.view(output.size()[0], -1)
-        return output
-
-    def forward(self, input1, input2):
-        output1 = self.forward_once(input1)
-        output2 = self.forward_once(input2)
-        output = torch.cat([output1, output2], dim=1)
-        output = self.fc1(output)
-        return output
-
-
 ###############################################################################
 # Networks and Models
 ###############################################################################
