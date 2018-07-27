@@ -44,9 +44,11 @@ class Options():
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         parser.add_argument('--age_bins', nargs='+', type=int, default=[1, 11, 21, 31, 41, 51, 61, 71, 81, 91], help='list of bins, the (i+1)-th group is in the range [age_binranges[i], age_binranges[i+1]), e.g. [1, 11, 21, ..., 101], the 1-st group is [1, 10], the 9-th [91, 100], however, the 10-th [101, +inf)')
         parser.add_argument('--weight', nargs='+', type=float, default=[], help='weights for CE')
-        parser.add_argument('--dropout_p', type=float, default=0.5, help='dropout p')
+        parser.add_argument('--dropout', type=float, default=0.5, help='dropout p')
         parser.add_argument('--finetune_fc_only', action='store_true', help='fix feature extraction weights and finetune fc layers only, if True')
         parser.add_argument('--fc_dim', type=int, default=64, help='dimension of fc')
+        parser.add_argument('--cnn_dim', type=int, nargs='+', default=[], help='cnn kernel dims for feature dimension reduction')
+        parser.add_argument('--lambda_reg', type=float, default=0.0, help='weight for feature regularization loss')
 
         return parser
 
@@ -60,7 +62,8 @@ class Options():
         # weight
         if self.opt.weight:
             assert(len(self.opt.weight) == self.opt.num_classes)
-        self.print_options(self.opt)
+        if self.opt.mode == 'train':
+            self.print_options(self.opt)
         return self.opt
     
     def print_options(self, opt):
@@ -136,14 +139,33 @@ class SingleImageDataset(Dataset):
 # Networks and Models
 ###############################################################################
 class SiameseNetwork(nn.Module):
-    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64):
+    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64, cnn_dim=[]):
         super(SiameseNetwork, self).__init__()
         self.pooling = pooling
-        if pooling:
-            fw = 1
-        else:
-            fw = 6
+        fw = 1 if pooling else 6
         self.base = base
+        if cnn_dim:
+            conv_block = []
+            nf_prev = base.feature_dim
+            for i in range(len(cnn_dim)-1):
+                nf = cnn_dim[i]
+                conv_block += [
+                    nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=1, bias=True),
+                    nn.BatchNorm2d(nf),
+                    nn.ReLU(True)
+                ]
+                nf_prev = nf
+            nf = cnn_dim[-1]
+            conv_block += [nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=1, bias=True)]
+            base.feature_dim = nf
+            self.cnn = nn.Sequential(*conv_block)
+            self.cxn = nn.Sequential(
+                nn.BatchNorm2d(nf),
+                nn.ReLU(True)
+            )
+        else:
+            self.cnn = None
+            self.cxn = None
         self.fc = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(base.feature_dim * fw * fw * 2, fc_dim),
@@ -151,39 +173,73 @@ class SiameseNetwork(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(fc_dim, num_classes),
         )
+        self.feature_dim = base.feature_dim
 
     def forward_once(self, x):
         output = self.base.forward(x)
+        if self.cnn:
+            output = self.cnn(output)
+        feature = output
+        if self.cxn:
+            output = self.cxn(output)
         if self.pooling == 'avg':
             output = nn.AvgPool2d(output.size(2))(output)
         elif self.pooling == 'max':
             output = nn.MaxPool2d(output.size(2))(output)
         output = output.view(output.size(0), -1)
-        return output
+        return output, nn.AvgPool2d(feature.size(2))(feature)
 
     def forward(self, input1, input2):
-        output1 = self.forward_once(input1)
-        output2 = self.forward_once(input2)
+        output1, feature1 = self.forward_once(input1)
+        output2, feature2 = self.forward_once(input2)
         output = torch.cat((output1, output2), dim=1)
         output = self.fc(output)
-        return output
+        return output, feature1, feature2
     
-    def get_feature(self, x):
+    def load_pretrained(self, state_dict):
+        # used when loading pretrained base model
+        # warning: self.cnn and self.fc won't be initialized
+        self.base.load_pretrained(state_dict)
+
+
+class SiameseFeature(nn.Module):
+    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64, cnn_dim=[]):
+        super(SiameseFeature, self).__init__()
+        self.pooling = pooling
+        self.base = base
+        if cnn_dim:
+            conv_block = []
+            nf_prev = base.feature_dim
+            for i in range(len(cnn_dim)-1):
+                nf = cnn_dim[i]
+                conv_block += [
+                    nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=1, bias=True),
+                    nn.BatchNorm2d(nf),
+                    nn.ReLU(True)
+                ]
+                nf_prev = nf
+            nf = cnn_dim[-1]
+            conv_block += [nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=1, bias=True)]
+            base.feature_dim = nf
+            self.cnn = nn.Sequential(*conv_block)
+        else:
+            self.cnn = None
+        self.feature_dim = base.feature_dim
+    
+    def forward(self, x):
         output = self.base.forward(x)
+        if self.cnn:
+            output = self.cnn(output)
         if self.pooling == 'avg':
             output = nn.AvgPool2d(output.size(2))(output)
         elif self.pooling == 'max':
             output = nn.MaxPool2d(output.size(2))(output)
         return output
-    
-    def init_weights(self, state_dict):
-        # only base needs pretrained weights
-        self.base.init_weights(state_dict)
 
 
-class AlexNetFeatures(nn.Module):
+class AlexNetFeature(nn.Module):
     def __init__(self, pooling='avg'):
-        super(AlexNetFeatures, self).__init__()
+        super(AlexNetFeature, self).__init__()
         sequence = [
             nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
             nn.ReLU(inplace=True),
@@ -210,15 +266,15 @@ class AlexNetFeatures(nn.Module):
         x = self.features(x)
         return x
     
-    def init_weights(self, state_dict):
+    def load_pretrained(self, state_dict):
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
         self.load_state_dict(state_dict, strict=False)
 
 
-class ResNetFeatures(nn.Module):
+class ResNetFeature(nn.Module):
     def __init__(self, which_model):
-        super(ResNetFeatures, self).__init__()
+        super(ResNetFeature, self).__init__()
         model = None
         feature_dim = None
         if which_model == 'resnet18':
@@ -233,6 +289,15 @@ class ResNetFeatures(nn.Module):
             from torchvision.models import resnet50
             model = resnet50(False)
             feature_dim = 512 * 4
+        elif which_model == 'resnet101':
+            from torchvision.models import resnet101
+            model = resnet101(False)
+            feature_dim = 512 * 4
+        elif which_model == 'resnet152':
+            from torchvision.models import resnet152
+            model = resnet152(False)
+            feature_dim = 512 * 4
+        delattr(model, 'fc')
         self.model = model
         self.feature_dim = feature_dim
 
@@ -249,13 +314,9 @@ class ResNetFeatures(nn.Module):
 
         return x
     
-    def init_weights(self, state_dict):
+    def load_pretrained(self, state_dict):
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
-            if 'fc.weight' in state_dict:
-                del state_dict['fc.weight']
-            if 'fc.bias' in state_dict:
-                del state_dict['fc.bias']
         self.model.load_state_dict(state_dict, strict=False)
 
 
@@ -322,25 +383,30 @@ def get_model(opt):
     # define base model
     base = None
     if opt.which_model == 'alexnet':
-        base = AlexNetFeatures(pooling='')
+        base = AlexNetFeature(pooling='')
     elif 'resnet' in opt.which_model:
-        base = ResNetFeatures(opt.which_model)
+        base = ResNetFeature(opt.which_model)
     else:
         raise NotImplementedError('Model [%s] is not implemented.' % opt.which_model)
     
     # define Siamese Network
-    net = SiameseNetwork(opt.num_classes, base, opt.pooling, opt.dropout_p, opt.fc_dim)
+    # FIXME: SiameseNetwork or SiameseFeature according to opt.mode
+    if opt.mode == 'visualize' or opt.mode == 'extract_feature':
+        net = SiameseFeature(opt.num_classes, base, opt.pooling, opt.dropout, opt.fc_dim, opt.cnn_dim)
+    else:
+        net = SiameseNetwork(opt.num_classes, base, opt.pooling, opt.dropout, opt.fc_dim, opt.cnn_dim)
 
     # initialize | load weights
     if opt.mode == 'train':
         net.apply(weights_init)
         if opt.use_pretrained_model:
             if isinstance(net, torch.nn.DataParallel):
-                net.module.init_weights(opt.pretrained_model_path)
+                net.module.load_pretrained(opt.pretrained_model_path)
             else:
-                net.init_weights(opt.pretrained_model_path)
+                net.load_pretrained(opt.pretrained_model_path)
     else:
-        net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))))
+        # HACK: strict=False
+        net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))), strict=False)
         net.eval()
     
     if opt.use_gpu:
@@ -379,8 +445,15 @@ def train(opt, net, dataloader):
             if opt.use_gpu:
                 img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
             optimizer.zero_grad()
-            output = net.forward(img0, img1)
-            loss = criterion(output, label)
+            if opt.lambda_reg > 0:
+                output, feat1, feat2 = net.forward(img0, img1)
+                reg1 = feat1.pow(2).mean()
+                reg2 = feat2.pow(2).mean()
+                loss = criterion(output, label) + (reg1 + reg2) * opt.lambda_reg
+                # print(feat1[0][0, 0, 0].norm(p=1))
+            else:
+                output, _, _ = net.forward(img0, img1)
+                loss = criterion(output, label)
             loss.backward()
             optimizer.step()
             if i % 10 == 0:
@@ -409,7 +482,7 @@ def test(opt, net, dataloader):
         img0, img1, label = data
         if opt.use_gpu:
             img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
-        output = net.forward(img0, img1)
+        output, _, _ = net.forward(img0, img1)
         target.append(label.cpu().detach().numpy().squeeze())
         pred.append(output.cpu().detach().numpy().squeeze().argmax())
         if target[-1] == pred[-1]:
@@ -428,25 +501,45 @@ def visualize(opt, net, dataloader):
         img0, path0 = data
         if opt.use_gpu:
             img0 = img0.cuda()
-        feature = net.get_feature(img0)
+        feature = net.forward(img0)
         feature = feature.cpu().detach().numpy()
-        features.append(feature.reshape([1, 512]))
+        features.append(feature.reshape([1, net.feature_dim]))
         labels.append(parse_age_label(path0[0], opt.age_bins_with_inf))
         # np.save('features/%s' % (path0[0].replace('.jpg', '.npy')), feature)
         print('--> %s' % path0[0])
 
     X = np.concatenate(features, axis=0)
     labels = np.array(labels)
-    np.save('features.npy', X)
-    np.save('labels.npy', labels)
-    # colors = 'r', 'g', 'b', 'c', 'm'
-    # plt.figure()
-    # for i, c, label in zip([0, 1, 2, 3, 4], colors, [0, 1, 2, 3, 4]):
-    #     plt.scatter(X[labels==i, 0], X[labels==i, 1], c=c, label=label)
+    np.save(os.path.join(opt.checkpoint_dir, opt.name, 'features.npy'), X)
+    np.save(os.path.join(opt.checkpoint_dir, opt.name, 'labels.npy'), labels)
 
-    # # plt.scatter(X[:,0], X[:,1], label=labels)
-    # plt.legend()
-    # plt.show()
+
+# Routines for visualization
+def extract_feature(opt, net, dataloader):
+    features = []
+    labels = []
+    for _, data in enumerate(dataloader, 0):
+        img0, path0 = data
+        if opt.use_gpu:
+            img0 = img0.cuda()
+        feature = net.forward(img0)
+        feature = feature.cpu().detach().numpy()
+        features.append(feature)
+        labels.append(parse_age_label(path0[0], opt.age_bins_with_inf))
+        print('--> %s' % path0[0])
+
+    X = np.concatenate(features, axis=0)
+    labels = np.array(labels)
+    
+    # FIXME: hard coded
+    new_features = []
+    for L in range(5):
+        idx = labels == L
+        Y = X[idx,...]
+        new_features.append(Y)
+    np.save('features_Y.npy', new_features)
+    # np.save('ex_features.npy', X)
+    # np.save('ex_labels.npy', labels)
 
 
 ###############################################################################
@@ -478,5 +571,11 @@ if __name__=='__main__':
         dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         # test
         visualize(opt, net, dataloader)
+    elif opt.mode == 'extract_feature':
+        # get dataloader
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
+        dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
+        # test
+        extract_feature(opt, net, dataloader)
     else:
         raise NotImplementedError('Mode [%s] is not implemented.' % opt.mode)

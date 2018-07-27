@@ -170,7 +170,7 @@ class AlexNet(nn.Module):
         x = self.classifier(x)
         return x
     
-    def init_weights(self, state_dict):
+    def load_pretrained(self, state_dict):
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
         if 'classifier.6.weight' in state_dict:
@@ -184,49 +184,12 @@ class AlexNet(nn.Module):
         return self.classifier.parameters()
 
 
-class AlexNetFeatures(nn.Module):
-    def __init__(self, pooling='avg'):
-        super(AlexNetFeatures, self).__init__()
-        sequence = [
-            nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(64, 192, kernel_size=5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(192, 384, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(384, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-        ]
-        if pooling == 'avg':
-            sequence += [nn.AvgPool2d(kernel_size=6)]
-        elif pooling == 'max':
-            sequence += [nn.MaxPool2d(kernel_size=6)]
-        self.features = nn.Sequential(*sequence)
-
-    def forward(self, x):
-        x = self.features(x)
-        return x
-    
-    def init_weights(self, state_dict):
-        if isinstance(state_dict, str):
-            state_dict = torch.load(state_dict)
-        self.load_state_dict(state_dict, strict=False)
-
-
 # a lighter alexnet, with fewer params in fc layers
 class AlexNetLite(nn.Module):
     def __init__(self, num_classes=10, pooling='avg', dropout=0.5):
         super(AlexNetLite, self).__init__()
         self.pooling = pooling
-        if pooling:
-            fw = 1
-        else:
-            fw = 6
+        fw = 1 if pooling else 6
         self.features = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
             nn.ReLU(inplace=True),
@@ -260,7 +223,7 @@ class AlexNetLite(nn.Module):
         x = self.fc(x)
         return x
     
-    def init_weights(self, state_dict):
+    def load_pretrained(self, state_dict):
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
         # do not use self.features.load_state_dict() which will load nothing
@@ -287,12 +250,20 @@ class ResNet(nn.Module):
             from torchvision.models import resnet50
             model = resnet50(False)
             model.fc = nn.Linear(512 * 4, num_classes)
+        elif which_model == 'resnet101':
+            from torchvision.models import resnet101
+            model = resnet101(False)
+            model.fc = nn.Linear(512 * 4, num_classes)
+        elif which_model == 'resnet152':
+            from torchvision.models import resnet152
+            model = resnet152(False)
+            model.fc = nn.Linear(512 * 4, num_classes)
         self.model = model
     
     def forward(self, x):
         return self.model(x)
     
-    def init_weights(self, state_dict):
+    def load_pretrained(self, state_dict):
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
             if 'fc.weight' in state_dict:
@@ -354,9 +325,6 @@ class NLayerClassifier(nn.Module):
         y = nn.AvgPool2d(x.size(2))(x)  # x.size(2)==x.size(3)
         y = self.classifier(y)
         return y.view(y.size(0), -1)
-
-    # def init_weights(self, _):
-    #     return None
 
 
 class ContrastiveLoss(torch.nn.Module):
@@ -437,9 +405,9 @@ def get_model(opt):
         net.apply(weights_init)
         if opt.use_pretrained_model:
             if isinstance(net, torch.nn.DataParallel):
-                net.module.init_weights(opt.pretrained_model_path)
+                net.module.load_pretrained(opt.pretrained_model_path)
             else:
-                net.init_weights(opt.pretrained_model_path)
+                net.load_pretrained(opt.pretrained_model_path)
     else:
         net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))))
         net.eval()
