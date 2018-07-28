@@ -49,6 +49,7 @@ class Options():
         parser.add_argument('--fc_dim', type=int, default=64, help='dimension of fc')
         parser.add_argument('--cnn_dim', type=int, nargs='+', default=[], help='cnn kernel dims for feature dimension reduction')
         parser.add_argument('--lambda_reg', type=float, default=0.0, help='weight for feature regularization loss')
+        parser.add_argument('--use_contrastive_loss', action='store_true')
 
         return parser
 
@@ -320,6 +321,53 @@ class ResNetFeature(nn.Module):
         self.model.load_state_dict(state_dict, strict=False)
 
 
+class TheSiameseNetwork(nn.Module):
+    def __init__(self):
+        super(TheSiameseNetwork, self).__init__()
+        self.cnn1 = nn.Sequential(
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(3, 4, kernel_size=3),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(4),
+            nn.Dropout2d(p=.2),
+            
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(4, 8, kernel_size=3),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(8),
+            nn.Dropout2d(p=.2),
+                
+            nn.ReflectionPad2d(1),
+            nn.Conv2d(8, 8, kernel_size=3),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(8),
+            nn.Dropout2d(p=.2),
+        )
+        
+        self.fc1 = nn.Sequential(
+            nn.Linear(8*100*100, 500),
+            nn.ReLU(inplace=True),
+            
+            nn.Linear(500, 500),
+            nn.ReLU(inplace=True),
+            
+            nn.Linear(500, 5)
+        )
+
+        self.feature_dim = 5
+
+    def forward_once(self, x):
+        output = self.cnn1(x)
+        output = output.view(output.size()[0], -1)
+        output = self.fc1(output)
+        return output
+    
+    def forward(self, input1, input2):
+        output1 = self.forward_once(input1)
+        output2 = self.forward_once(input2)
+        return output1, output2
+
+
 class ContrastiveLoss(torch.nn.Module):
     """
     Contrastive loss function.
@@ -380,6 +428,10 @@ def parse_age_label(fname, binranges):
 # Main Routines
 ###############################################################################
 def get_model(opt):
+    if opt.which_model == 'thesiamese':
+        net = TheSiameseNetwork()
+        net.apply(weights_init)
+        return net.cuda()
     # define base model
     base = None
     if opt.which_model == 'alexnet':
@@ -416,13 +468,16 @@ def get_model(opt):
 
 # Routines for training
 def train(opt, net, dataloader):
-    if len(opt.weight):
-        opt.weight = torch.Tensor(opt.weight)
-        if opt.use_gpu:
-            opt.weight = opt.weight.cuda()
-        criterion = torch.nn.CrossEntropyLoss(weight=opt.weight)
+    if opt.use_contrastive_loss:
+        criterion = ContrastiveLoss()
     else:
-        criterion = torch.nn.CrossEntropyLoss()
+        if len(opt.weight):
+            opt.weight = torch.Tensor(opt.weight)
+            if opt.use_gpu:
+                opt.weight = opt.weight.cuda()
+            criterion = torch.nn.CrossEntropyLoss(weight=opt.weight)
+        else:
+            criterion = torch.nn.CrossEntropyLoss()
     opt.save_dir = os.path.join(opt.checkpoint_dir, opt.name)
     if not os.path.exists(opt.save_dir):
         os.makedirs(opt.save_dir)
@@ -445,15 +500,23 @@ def train(opt, net, dataloader):
             if opt.use_gpu:
                 img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
             optimizer.zero_grad()
-            if opt.lambda_reg > 0:
-                output, feat1, feat2 = net.forward(img0, img1)
-                reg1 = feat1.pow(2).mean()
-                reg2 = feat2.pow(2).mean()
-                loss = criterion(output, label) + (reg1 + reg2) * opt.lambda_reg
-                # print(feat1[0][0, 0, 0].norm(p=1))
+            if opt.use_contrastive_loss:
+                # new label: 0 similar (1), 1 dissimilar (0, 2)
+                idx = label == 1
+                label[idx] = 0
+                label[1-idx] = 1
+                output1, output2 = net.forward(img0, img1)
+                loss = criterion(output1, output2, label.float())
             else:
-                output, _, _ = net.forward(img0, img1)
-                loss = criterion(output, label)
+                if opt.lambda_reg > 0:
+                    output, feat1, feat2 = net.forward(img0, img1)
+                    reg1 = feat1.pow(2).mean()
+                    reg2 = feat2.pow(2).mean()
+                    loss = criterion(output, label) + (reg1 + reg2) * opt.lambda_reg
+                    # print(feat1[0][0, 0, 0].norm(p=1))
+                else:
+                    output, _, _ = net.forward(img0, img1)
+                    loss = criterion(output, label)
             loss.backward()
             optimizer.step()
             if i % 10 == 0:
@@ -501,7 +564,10 @@ def visualize(opt, net, dataloader):
         img0, path0 = data
         if opt.use_gpu:
             img0 = img0.cuda()
-        feature = net.forward(img0)
+        if opt.which_model == 'thesiamese':
+            feature = net.forward_once(img0)
+        else:
+            feature = net.forward(img0)
         feature = feature.cpu().detach().numpy()
         features.append(feature.reshape([1, net.feature_dim]))
         labels.append(parse_age_label(path0[0], opt.age_bins_with_inf))
