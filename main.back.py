@@ -3,8 +3,6 @@ import argparse
 import random
 import functools
 import numpy as np
-from scipy import stats
-import scipy.io as sio
 from PIL import Image
 import matplotlib.pyplot as plt
 import torch
@@ -27,8 +25,6 @@ class Options():
         parser.add_argument('--name', type=str, default='exp', help='experiment name')
         parser.add_argument('--dataroot', required=True, default='datasets/UTKFace', help='path to images')
         parser.add_argument('--datafile', type=str, default='', help='text file listing images')
-        parser.add_argument('--dataroot_val', type=str, default='')
-        parser.add_argument('--datafile_val', type=str, default='')
         parser.add_argument('--pretrained_model_path', type=str, default='pretrained_models/alexnet.pth', help='path to pretrained models')
         parser.add_argument('--use_pretrained_model', action='store_true', help='use pretrained model')
         parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
@@ -50,15 +46,10 @@ class Options():
         parser.add_argument('--weight', nargs='+', type=float, default=[], help='weights for CE')
         parser.add_argument('--dropout', type=float, default=0.5, help='dropout p')
         parser.add_argument('--finetune_fc_only', action='store_true', help='fix feature extraction weights and finetune fc layers only, if True')
-        parser.add_argument('--fc_dim', type=int, nargs='+', default=[64, 3], help='dimension of fc')
+        parser.add_argument('--fc_dim', type=int, default=64, help='dimension of fc')
         parser.add_argument('--cnn_dim', type=int, nargs='+', default=[], help='cnn kernel dims for feature dimension reduction')
-        parser.add_argument('--cnn_pad', type=int, default=1, help='padding of cnn layers defined by cnn_dim')
-        parser.add_argument('--use_cxn', action='store_true', help='if true, add batchNorm and ReLU between cnn and fc')
         parser.add_argument('--lambda_regularization', type=float, default=0.0, help='weight for feature regularization loss')
-        parser.add_argument('--lambda_contrastive', type=float, default=0.0, help='weight for contrastive loss')
-        parser.add_argument('--print_freq', type=int, default=10, help='print loss every print_freq iterations')
-        parser.add_argument('--display_id', type=int, default=1, help='visdom window id, to disable visdom set id = -1.')
-        parser.add_argument('--display_port', type=int, default=8097)
+        parser.add_argument('--lambda_contrastive', type=float, default=0.0)
 
         return parser
 
@@ -146,43 +137,13 @@ class SingleImageDataset(Dataset):
 
 
 ###############################################################################
-# Loss Functions
-###############################################################################
-class CrossEntropyLoss(nn.Module):
-    def __init__(self, weight):
-        super(CrossEntropyLoss, self).__init__()
-        self.loss = nn.CrossEntropyLoss(weight=weight)
-    
-    def __call__(self, input, target):
-        target_tensor = target.reshape(input.size(0), 1, 1).expand(input.size(0), input.size(2), input.size(3))
-        return self.loss(input, target_tensor)
-
-
-class ContrastiveLoss(nn.Module):
-    """
-    Contrastive loss function.
-    Based on: http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
-    """
-
-    def __init__(self, margin=2.0):
-        super(ContrastiveLoss, self).__init__()
-        self.margin = margin
-
-    def forward(self, output1, output2, label):
-        euclidean_distance = F.pairwise_distance(output1, output2)
-        loss_contrastive = torch.mean((1-label) * torch.pow(euclidean_distance, 2) +
-                                      (label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
-        return loss_contrastive
-
-
-###############################################################################
 # Networks and Models
 ###############################################################################
 class SiameseNetwork(nn.Module):
-    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64, cnn_dim=[], cnn_pad=1, use_cxn=True):
+    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64, cnn_dim=[]):
         super(SiameseNetwork, self).__init__()
-        assert(num_classes == fc_dim[-1])
         self.pooling = pooling
+        fw = 1 if pooling else 6
         # base
         self.base = base
         # additional cnns
@@ -192,66 +153,50 @@ class SiameseNetwork(nn.Module):
             for i in range(len(cnn_dim)-1):
                 nf = cnn_dim[i]
                 conv_block += [
-                    nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=cnn_pad, bias=True),
+                    nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=1, bias=True),
                     nn.BatchNorm2d(nf),
                     nn.ReLU(True)
                 ]
                 nf_prev = nf
-            conv_block += [nn.Conv2d(nf_prev, cnn_dim[-1], kernel_size=3, stride=1, padding=cnn_pad, bias=True)]
-            base.feature_dim = cnn_dim[-1]
+            nf = cnn_dim[-1]
+            conv_block += [nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=1, bias=True)]
+            base.feature_dim = nf
             self.cnn = nn.Sequential(*conv_block)
-            self.cxn = nn.Sequential(nn.BatchNorm2d(cnn_dim[-1]), nn.ReLU(True)) if use_cxn else None
+            self.cxn = nn.Sequential(
+                nn.BatchNorm2d(nf),
+                nn.ReLU(True)
+            )
         else:
             self.cnn = None
             self.cxn = None
         # fc layers
-        fc_blocks = []
-        nf_prev = base.feature_dim * 2
-        for i in range(len(fc_dim)-1):
-            nf = fc_dim[i]
-            fc_blocks += [
-                nn.Dropout(dropout),
-                nn.Conv2d(nf_prev, nf, kernel_size=1, stride=1, padding=0, bias=True),
-                nn.ReLU(True),
-            ]
-            nf_prev = nf
-        fc_blocks += [
+        self.fc = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Conv2d(nf_prev, fc_dim[-1], kernel_size=1, stride=1, padding=0, bias=True)
-        ]
-        self.fc = nn.Sequential(*fc_blocks)
+            nn.Linear(base.feature_dim * fw * fw * 2, fc_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(fc_dim, num_classes),
+        )
         self.feature_dim = base.feature_dim
 
     def forward_once(self, x):
-        # FIXME: in which order? cnn -> cxn -> pooling -> fc
         output = self.base.forward(x)
         if self.cnn:
             output = self.cnn(output)
+        feature = output
         if self.cxn:
             output = self.cxn(output)
         if self.pooling == 'avg':
             output = nn.AvgPool2d(output.size(2))(output)
         elif self.pooling == 'max':
             output = nn.MaxPool2d(output.size(2))(output)
-        return output
-
-        # # cnn -> pooling -> cxn -> fc
-        # output = self.base.forward(x)
-        # if self.cnn:
-        #     output = self.cnn(output)
-        # if self.pooling == 'avg':
-        #     output = nn.AvgPool2d(output.size(2))(output)
-        # elif self.pooling == 'max':
-        #     output = nn.MaxPool2d(output.size(2))(output)
-        # feature = output
-        # if self.cxn:
-        #     output = self.cxn(output)
-        # return output, feature
+        output = output.view(output.size(0), -1)
+        return output, nn.AvgPool2d(feature.size(2))(feature)
 
     def forward(self, input1, input2):
-        feature1 = self.forward_once(input1)
-        feature2 = self.forward_once(input2)
-        output = torch.cat((feature1, feature2), dim=1)
+        output1, feature1 = self.forward_once(input1)
+        output2, feature2 = self.forward_once(input2)
+        output = torch.cat((output1, output2), dim=1)
         output = self.fc(output)
         return feature1, feature2, output
     
@@ -262,7 +207,7 @@ class SiameseNetwork(nn.Module):
 
 
 class SiameseFeature(nn.Module):
-    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64, cnn_dim=[], cnn_pad=1):
+    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64, cnn_dim=[]):
         super(SiameseFeature, self).__init__()
         self.pooling = pooling
         self.base = base
@@ -272,13 +217,14 @@ class SiameseFeature(nn.Module):
             for i in range(len(cnn_dim)-1):
                 nf = cnn_dim[i]
                 conv_block += [
-                    nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=cnn_pad, bias=True),
+                    nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=1, bias=True),
                     nn.BatchNorm2d(nf),
                     nn.ReLU(True)
                 ]
                 nf_prev = nf
-            conv_block += [nn.Conv2d(nf_prev, cnn_dim[-1], kernel_size=3, stride=1, padding=cnn_pad, bias=True)]
-            base.feature_dim = cnn_dim[-1]
+            nf = cnn_dim[-1]
+            conv_block += [nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=1, bias=True)]
+            base.feature_dim = nf
             self.cnn = nn.Sequential(*conv_block)
         else:
             self.cnn = None
@@ -425,6 +371,23 @@ class TheSiameseNetwork(nn.Module):
         return output1, output2, None
 
 
+class ContrastiveLoss(torch.nn.Module):
+    """
+    Contrastive loss function.
+    Based on: http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
+    """
+
+    def __init__(self, margin=2.0):
+        super(ContrastiveLoss, self).__init__()
+        self.margin = margin
+
+    def forward(self, output1, output2, label):
+        euclidean_distance = F.pairwise_distance(output1, output2)
+        loss_contrastive = torch.mean((1-label) * torch.pow(euclidean_distance, 2) +
+                                      (label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
+        return loss_contrastive
+
+
 ###############################################################################
 # Helper Functions | Utilities
 ###############################################################################
@@ -464,19 +427,15 @@ def parse_age_label(fname, binranges):
     return l
 
 
-def get_prediction(score):
-    score_cpu = score.detach().cpu().numpy()
-    pred = stats.mode(score_cpu.argmax(axis=1).reshape(score.size(0), -1), axis=1)
-    return pred[0]
-
-
 ###############################################################################
 # Main Routines
 ###############################################################################
 def get_model(opt):
     # the original Siamese network
     if opt.which_model == 'thesiamese':
-        return TheSiameseNetwork().apply(weights_init).cuda()
+        net = TheSiameseNetwork()
+        net.apply(weights_init)
+        return net.cuda()
     
     # define base model
     base = None
@@ -490,9 +449,9 @@ def get_model(opt):
     # define Siamese Network
     # FIXME: SiameseNetwork or SiameseFeature according to opt.mode
     if opt.mode == 'visualize' or opt.mode == 'extract_feature':
-        net = SiameseFeature(opt.num_classes, base, opt.pooling, opt.dropout, opt.fc_dim, opt.cnn_dim, opt.cnn_pad)
+        net = SiameseFeature(opt.num_classes, base, opt.pooling, opt.dropout, opt.fc_dim, opt.cnn_dim)
     else:
-        net = SiameseNetwork(opt.num_classes, base, opt.pooling, opt.dropout, opt.fc_dim, opt.cnn_dim, opt.cnn_pad, opt.use_cxn)
+        net = SiameseNetwork(opt.num_classes, base, opt.pooling, opt.dropout, opt.fc_dim, opt.cnn_dim)
 
     # initialize | load weights
     if opt.mode == 'train':
@@ -513,22 +472,20 @@ def get_model(opt):
 
 
 # Routines for training
-def train(opt, net, dataloader, dataloader_val=None):
-    if opt.lambda_contrastive > 0:
+def train(opt, net, dataloader):
+    if opt.use_contrastive_loss:
         criterion_constrastive = ContrastiveLoss()
     opt.save_dir = os.path.join(opt.checkpoint_dir, opt.name)
     if not os.path.exists(opt.save_dir):
         os.makedirs(opt.save_dir)
-    
     # criterion
     if len(opt.weight):
-        weight = torch.Tensor(opt.weight)
+        opt.weight = torch.Tensor(opt.weight)
         if opt.use_gpu:
-            weight = weight.cuda()
+            opt.weight = opt.weight.cuda()
+        criterion = torch.nn.CrossEntropyLoss(weight=opt.weight)
     else:
-        weight = None
-    criterion = CrossEntropyLoss(weight=weight)
-
+        criterion = torch.nn.CrossEntropyLoss()
     # optimizer
     if opt.finetune_fc_only:
         if isinstance(net, nn.DataParallel):
@@ -539,38 +496,21 @@ def train(opt, net, dataloader, dataloader_val=None):
         param = net.parameters()
     optimizer = optim.Adam(param, lr=opt.lr)
 
+    counter = []
     loss_history = []
-    total_iter = 0
-    opt.display_val_acc = not not dataloader_val
-    dataset_size, dataset_size_val = opt.dataset_size, opt.dataset_size_val
-    if opt.display_id >= 0:
-        import visdom
-        vis = visdom.Visdom(server='http://localhost', port=opt.display_port)
-        plot_data = {'X': [], 'Y': [], 'leg': ['loss']}
-        plot_acc = {'X': [], 'Y': [], 'leg': ['train', 'val'] if opt.display_val_acc else ['train']}
-    
+    iteration_number = 0
+
     # start training
     for epoch in range(1, opt.num_epochs+1):
-        epoch_iter = 0
-        pred_train = []
-        target_train = []
-
         for i, data in enumerate(dataloader, 0):
             img0, img1, label = data
             if opt.use_gpu:
                 img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
-            curr_batch_size = img0.size(0)
-            epoch_iter += curr_batch_size
-            total_iter += curr_batch_size
-
             optimizer.zero_grad()
-
-            # net forward
-            feat1, feat2, score = net(img0, img1)
-
             # classification loss
             if opt.which_model != 'thesiamese':
-                loss_classification = criterion(score, label)
+                feat1, feat2, pred = net(img0, img1)
+                loss_classification = criterion(pred, label)
             else:
                 loss_classification = 0
 
@@ -582,7 +522,7 @@ def train(opt, net, dataloader, dataloader_val=None):
                 label_new[idx] = 0
                 label_new[1-idx] = 1
                 loss_contrastive = criterion_constrastive(
-                    feat1.view(curr_batch_size, -1), feat2.view(curr_batch_size, -1), label_new.float()
+                    feat1.view(feat1.size(0), -1), feat2.view(feat1.size(0), -1), label_new.float()
                     ) * opt.lambda_contrastive
             else:
                 loss_contrastive = 0
@@ -598,56 +538,14 @@ def train(opt, net, dataloader, dataloader_val=None):
             # conbined loss
             loss = loss_classification + loss_contrastive + loss_regularization
 
-            # get predictions
-            pred_train.append(get_prediction(score).squeeze())
-            target_train.append(label.cpu().numpy().squeeze())
-
             loss.backward()
             optimizer.step()
 
-            if total_iter % opt.print_freq == 0:
-                print("Epoch %d. Current loss %.4f" % (epoch, loss.item()))
-                if opt.display_id >= 0:
-                    plot_data['X'].append(epoch+float(epoch_iter)/dataset_size)
-                    plot_data['Y'].append(loss.item())
-                    # print(plot_data)
-                    vis.line(X=np.array(plot_data['X']), Y=np.array(plot_data['Y']),
-                        opts={'title': 'loss', 'legend': plot_data['leg'], 'xlabel': 'epoch', 'ylabel': 'loss'},
-                        win=opt.display_id)
+            if i % 10 == 0:
+                print("Epoch number {}\n Current loss {}\n".format(epoch, loss.item()))
+                iteration_number += 10
+                counter.append(iteration_number)
                 loss_history.append(loss.item())
-        
-        curr_acc = {}
-        # evaluate training
-        err_train = np.count_nonzero(np.stack(pred_train) - np.stack(target_train)) / dataset_size
-        curr_acc['train'] = 1 - err_train
-
-        # evaluate val
-        if opt.display_val_acc:
-            pred_val = []
-            target_val = []
-            for i, data in enumerate(dataloader_val, 0):
-                img0, img1, label = data
-                if opt.use_gpu:
-                    img0, img1 = img0.cuda(), img1.cuda()
-                _, _, output = net.forward(img0, img1)
-                pred_val.append(get_prediction(output).squeeze())
-                target_val.append(label.cpu().numpy().squeeze())
-            err_val = np.count_nonzero(np.stack(pred_val) - np.stack(target_val)) / dataset_size_val
-            curr_acc['val'] = 1 - err_val
-
-        # plot accs
-        if opt.display_id >= 0:
-            plot_acc['X'].append(epoch)
-            plot_acc['Y'].append([curr_acc[k] for k in plot_acc['leg']])
-            vis.line(
-                X=np.stack([np.array(plot_acc['X'])] * len(plot_acc['leg']), 1),
-                Y=np.array(plot_acc['Y']),
-                opts={'title': 'accuracy', 'legend': plot_acc['leg'], 'xlabel': 'epoch', 'ylabel': 'accuracy'},
-                win=opt.display_id+1
-            )
-            sio.savemat(os.path.join(opt.save_dir, 'mat_data'), plot_data)
-            sio.savemat(os.path.join(opt.save_dir, 'mat_acc'), plot_acc)
-
         if epoch % opt.save_epoch_freq == 0:
             torch.save(net.state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
 
@@ -657,42 +555,27 @@ def train(opt, net, dataloader, dataloader_val=None):
     with open(os.path.join(opt.save_dir, 'loss.txt'), 'w') as f:
         for loss in loss_history:
             f.write(str(loss)+'\n')
+    # show_plot(counter, loss_history)
 
 
 # Routines for testing
 def test(opt, net, dataloader):
-    # pred = []
-    # target = []
-    # acc = 0
-    # for i, data in enumerate(dataloader, 0):
-    #     img0, img1, label = data
-    #     if opt.use_gpu:
-    #         img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
-    #     _, _, output = net.forward(img0, img1)
-    #     target.append(label.cpu().detach().numpy().squeeze())
-    #     pred.append(output.cpu().detach().numpy().squeeze().argmax())
-    #     if target[-1] == pred[-1]:
-    #         acc += 1
-    #     print('--> image #%d: target %d   pred %d' % (i+1, target[-1], pred[-1]))
-
-    # print('================================================================================')
-    # print('accuracy: %.6f' % (100. * acc/len(pred)))
-    dataset_size_val = opt.dataset_size_val
-    pred_val = []
-    target_val = []
+    pred = []
+    target = []
+    acc = 0
     for i, data in enumerate(dataloader, 0):
         img0, img1, label = data
         if opt.use_gpu:
-            img0, img1 = img0.cuda(), img1.cuda()
-        _, _, output = net.forward(img0, img1)
+            img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
+        output, _, _ = net.forward(img0, img1)
+        target.append(label.cpu().detach().numpy().squeeze())
+        pred.append(output.cpu().detach().numpy().squeeze().argmax())
+        if target[-1] == pred[-1]:
+            acc += 1
+        print('--> image #%d: target %d   pred %d' % (i+1, target[-1], pred[-1]))
 
-        pred_val.append(get_prediction(output).squeeze())
-        target_val.append(label.cpu().numpy().squeeze())
-        print('--> batch #%d' % (i+1))
-
-    err = np.count_nonzero(np.stack(pred_val) - np.stack(target_val)) / dataset_size_val
     print('================================================================================')
-    print('accuracy: %.6f' % (100. * (1-err)))
+    print('accuracy: %.6f' % (100. * acc/len(pred)))
 
 
 # Routines for visualization
@@ -762,35 +645,24 @@ if __name__=='__main__':
         # get dataloader
         dataset = SiameseNetworkDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
         dataloader = DataLoader(dataset, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
-        opt.dataset_size = len(dataset)
-        # val dataset
-        if opt.dataroot_val:
-            dataset_val = SiameseNetworkDataset(opt.dataroot_val, opt.datafile_val, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
-            dataloader_val = DataLoader(dataset_val, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
-            opt.dataset_size_val = len(dataset_val)
-        else:
-            dataloader_val = None
-            opt.dataset_size_val = 0
-        print('dataset size = %d' % len(dataset))
         # train
-        train(opt, net, dataloader, dataloader_val)
+        train(opt, net, dataloader)
     elif opt.mode == 'test':
         # get dataloader
         dataset = SiameseNetworkDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
-        dataloader = DataLoader(dataset, shuffle=False, num_workers=opt.num_workers, batch_size=opt.batch_size)
-        opt.dataset_size_val = len(dataset)
+        dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         # test
         test(opt, net, dataloader)
     elif opt.mode == 'visualize':
         # get dataloader
         dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
-        dataloader = DataLoader(dataset, shuffle=False, num_workers=0, batch_size=1)
+        dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         # test
         visualize(opt, net, dataloader)
     elif opt.mode == 'extract_feature':
         # get dataloader
         dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
-        dataloader = DataLoader(dataset, shuffle=False, num_workers=0, batch_size=1)
+        dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         # test
         extract_feature(opt, net, dataloader)
     else:
