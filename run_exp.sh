@@ -1,4 +1,4 @@
-set -e
+set -ex
 
 # ## utk5, simple
 # python main_regression.py \
@@ -356,68 +356,192 @@ set -e
 # --lr 0.0002 \
 # --init_type kaiming
 
-python main.py \
---dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
---mode train \
---name new_siamese_utk_644_4 \
---cnn_dim 64 4 \
---fc_dim 4 \
---which_model resnet18 \
---use_pretrained_model \
---pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
---age_bins 1 11 21 31 41 51 61 71 81 91 \
---num_classes 3 \
---lr 0.0002 \
---init_type kaiming \
---pooling max \
---dropout 0.05
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_644_4 \
+# --cnn_dim 64 4 \
+# --fc_dim 4 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05
 
-# 72
+# # 72
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_641_2 \
+# --cnn_dim 64 1 \
+# --fc_dim 2 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05
+
+# # 74.85
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_648_8 \
+# --cnn_dim 64 8 \
+# --fc_dim 8 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05
+
+# # 70.40
+# # 7.002   5.127
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_641_2_r1 \
+# --cnn_dim 64 1 \
+# --fc_dim 2 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05 \
+# --lambda_reg 1
+
+# # 70.25
+# # 0.7381   0.8940
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_641_2_r01 \
+# --cnn_dim 64 1 \
+# --fc_dim 2 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05 \
+# --lambda_reg 0.1
+
+# # 68.90
+# # 3.3863   2.7664
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_641_2_r001 \
+# --cnn_dim 64 1 \
+# --fc_dim 2 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05 \
+# --lambda_reg 0.01
+
+# # 67.95
+# # 7.2494   7.9706
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_641_2_r0001 \
+# --cnn_dim 64 1 \
+# --fc_dim 2 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05 \
+# --lambda_reg 0.001
+
+# # 72.05
+# # 3.768   3.015
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_641_2_r10 \
+# --cnn_dim 64 1 \
+# --fc_dim 2 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05 \
+# --lambda_reg 10
+
+
+# python main.py \
+# --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
+# --datafile data/train_pairs_utk10.txt \
+# --mode train \
+# --name new_siamese_utk_641_2_r100 \
+# --cnn_dim 64 1 \
+# --fc_dim 2 \
+# --which_model resnet18 \
+# --use_pretrained_model \
+# --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
+# --age_bins 1 11 21 31 41 51 61 71 81 91 \
+# --num_classes 3 \
+# --lr 0.0002 \
+# --init_type kaiming \
+# --pooling max \
+# --dropout 0.05 \
+# --lambda_reg 100
+
+
+
+## no cxn, no bn, relu
+# 74.7
 python main.py \
 --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
+--datafile data/train_pairs_m10_utk.txt \
+--dataroot_val /media/ligong/Toshiba/Datasets/UTKFace \
+--datafile_val data/test_pairs_m10_utk.txt \
 --mode train \
---name new_siamese_utk_641_2 \
+--name 731_newtest_nobn \
 --cnn_dim 64 1 \
---fc_dim 2 \
---which_model resnet18 \
---use_pretrained_model \
---pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
---age_bins 1 11 21 31 41 51 61 71 81 91 \
---num_classes 3 \
---lr 0.0002 \
---init_type kaiming \
---pooling max \
---dropout 0.05
-
-# 74.85
-python main.py \
---dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
---mode train \
---name new_siamese_utk_648_8 \
---cnn_dim 64 8 \
---fc_dim 8 \
---which_model resnet18 \
---use_pretrained_model \
---pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
---age_bins 1 11 21 31 41 51 61 71 81 91 \
---num_classes 3 \
---lr 0.0002 \
---init_type kaiming \
---pooling max \
---dropout 0.05
-
-# 70.40
-# 7.002   5.127
-python main.py \
---dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
---mode train \
---name new_siamese_utk_641_2_r1 \
---cnn_dim 64 1 \
---fc_dim 2 \
+--cnn_pad 1 \
+--fc_dim 3 3 \
 --which_model resnet18 \
 --use_pretrained_model \
 --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
@@ -427,17 +551,27 @@ python main.py \
 --init_type kaiming \
 --pooling max \
 --dropout 0.05 \
---lambda_reg 1
+--lambda_regularization 0 \
+--lambda_contrastive 0 \
+--batch_size 64 \
+--display_id 1 \
+--print_freq 50 \
+--num_epochs 15 \
+--save_epoch_freq 5 \
+--use_relu
 
-# 70.25
-# 0.7381   0.8940
+## no cxn, bn, no relu
+# 74.1
 python main.py \
 --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
+--datafile data/train_pairs_m10_utk.txt \
+--dataroot_val /media/ligong/Toshiba/Datasets/UTKFace \
+--datafile_val data/test_pairs_m10_utk.txt \
 --mode train \
---name new_siamese_utk_641_2_r01 \
+--name 731_newtest_norelu \
 --cnn_dim 64 1 \
---fc_dim 2 \
+--cnn_pad 1 \
+--fc_dim 3 3 \
 --which_model resnet18 \
 --use_pretrained_model \
 --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
@@ -447,17 +581,27 @@ python main.py \
 --init_type kaiming \
 --pooling max \
 --dropout 0.05 \
---lambda_reg 0.1
+--lambda_regularization 0 \
+--lambda_contrastive 0 \
+--batch_size 64 \
+--display_id 1 \
+--print_freq 50 \
+--num_epochs 15 \
+--save_epoch_freq 5 \
+--use_batchnorm
 
-# 68.90
-# 3.3863   2.7664
+## no cxn, no bn, no relu
+# 75.4
 python main.py \
 --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
+--datafile data/train_pairs_m10_utk.txt \
+--dataroot_val /media/ligong/Toshiba/Datasets/UTKFace \
+--datafile_val data/test_pairs_m10_utk.txt \
 --mode train \
---name new_siamese_utk_641_2_r001 \
+--name 731_newtest_nono \
 --cnn_dim 64 1 \
---fc_dim 2 \
+--cnn_pad 1 \
+--fc_dim 3 3 \
 --which_model resnet18 \
 --use_pretrained_model \
 --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
@@ -467,17 +611,26 @@ python main.py \
 --init_type kaiming \
 --pooling max \
 --dropout 0.05 \
---lambda_reg 0.01
+--lambda_regularization 0 \
+--lambda_contrastive 0 \
+--batch_size 64 \
+--display_id 1 \
+--print_freq 50 \
+--num_epochs 15 \
+--save_epoch_freq 5
 
-# 67.95
-# 7.2494   7.9706
+## cxn, no bn, relu
+# 70.95
 python main.py \
 --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
+--datafile data/train_pairs_m10_utk.txt \
+--dataroot_val /media/ligong/Toshiba/Datasets/UTKFace \
+--datafile_val data/test_pairs_m10_utk.txt \
 --mode train \
---name new_siamese_utk_641_2_r0001 \
+--name 731_newtest_cxn_nobn \
 --cnn_dim 64 1 \
---fc_dim 2 \
+--cnn_pad 1 \
+--fc_dim 3 3 \
 --which_model resnet18 \
 --use_pretrained_model \
 --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
@@ -487,43 +640,30 @@ python main.py \
 --init_type kaiming \
 --pooling max \
 --dropout 0.05 \
---lambda_reg 0.001
+--lambda_regularization 0 \
+--lambda_contrastive 0 \
+--batch_size 64 \
+--display_id 1 \
+--print_freq 50 \
+--num_epochs 15 \
+--save_epoch_freq 5 \
+--use_relu \
+--use_cxn
 
-# 72.05
-# 3.768   3.015
+## cxn, bn, no relu
+# 74.3
 python main.py \
 --dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
+--datafile data/train_pairs_m10_utk.txt \
+--dataroot_val /media/ligong/Toshiba/Datasets/UTKFace \
+--datafile_val data/test_pairs_m10_utk.txt \
 --mode train \
---name new_siamese_utk_641_2_r10 \
+--name 0801_test_cxn_norelu \
 --cnn_dim 64 1 \
---fc_dim 2 \
+--cnn_pad 1 \
+--fc_dim 3 3 \
 --which_model resnet18 \
---use_pretrained_model \
 --pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
---age_bins 1 11 21 31 41 51 61 71 81 91 \
---num_classes 3 \
---lr 0.0002 \
---init_type kaiming \
---pooling max \
 --dropout 0.05 \
---lambda_reg 10
-
-
-python main.py \
---dataroot /media/ligong/Toshiba/Datasets/UTKFace \
---datafile data/train_pairs_utk10.txt \
---mode train \
---name new_siamese_utk_641_2_r100 \
---cnn_dim 64 1 \
---fc_dim 2 \
---which_model resnet18 \
---use_pretrained_model \
---pretrained_model_path pretrained_models/resnet18-5c106cde.pth \
---age_bins 1 11 21 31 41 51 61 71 81 91 \
---num_classes 3 \
---lr 0.0002 \
---init_type kaiming \
---pooling max \
---dropout 0.05 \
---lambda_reg 100
+--save_epoch_freq 5 \
+--use_cxn
