@@ -31,12 +31,12 @@ class Options():
         parser.add_argument('--datafile_val', type=str, default='')
         parser.add_argument('--pretrained_model_path', type=str, default='', help='path to pretrained models')
         parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
-        parser.add_argument('--save_epoch_freq', type=int, default=10, help='frequency of saving checkpoints')
+        parser.add_argument('--save_epoch_freq', type=int, default=5, help='frequency of saving checkpoints')
         parser.add_argument('--num_workers', type=int, default=8, help='number of workers for data loader')
         parser.add_argument('--init_type', type=str, default='kaiming', help='network initialization [normal|xavier|kaiming|orthogonal]')
         parser.add_argument('--num_classes', type=int, default=3, help='number of classes')
         parser.add_argument('--num_epochs', type=int, default=50, help='number of epochs')
-        parser.add_argument('--batch_size', type=int, default=100, help='batch size')
+        parser.add_argument('--batch_size', type=int, default=64, help='batch size')
         parser.add_argument('--lr', type=float, default=0.0002, help='learning rate')
         parser.add_argument('--which_epoch', type=str, default='latest', help='which epoch to load')
         parser.add_argument('--which_model', type=str, default='resnet18', help='which model')
@@ -47,18 +47,19 @@ class Options():
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         parser.add_argument('--age_bins', nargs='+', type=int, default=[1, 11, 21, 31, 41, 51, 61, 71, 81, 91], help='list of bins, the (i+1)-th group is in the range [age_binranges[i], age_binranges[i+1]), e.g. [1, 11, 21, ..., 101], the 1-st group is [1, 10], the 9-th [91, 100], however, the 10-th [101, +inf)')
         parser.add_argument('--weight', nargs='+', type=float, default=[], help='weights for CE')
-        parser.add_argument('--dropout', type=float, default=0.5, help='dropout p')
+        parser.add_argument('--dropout', type=float, default=0.05, help='dropout p')
         parser.add_argument('--finetune_fc_only', action='store_true', help='fix feature extraction weights and finetune fc layers only, if True')
         parser.add_argument('--fc_dim', type=int, nargs='+', default=[3, 3], help='dimension of fc')
+        parser.add_argument('--fc_relu_slope', type=float, default=0.5)
         parser.add_argument('--cnn_dim', type=int, nargs='+', default=[64, 1], help='cnn kernel dims for feature dimension reduction')
         parser.add_argument('--cnn_pad', type=int, default=1, help='padding of cnn layers defined by cnn_dim')
-        parser.add_argument('--use_cxn', action='store_true', help='if true, add batchNorm and ReLU between cnn and fc')
+        parser.add_argument('--cnn_relu_slope', type=float, default=0.5)
+        parser.add_argument('--no_cxn', action='store_true', help='if true, do **not** add batchNorm and ReLU between cnn and fc')
         parser.add_argument('--lambda_regularization', type=float, default=0.0, help='weight for feature regularization loss')
         parser.add_argument('--lambda_contrastive', type=float, default=0.0, help='weight for contrastive loss')
         parser.add_argument('--print_freq', type=int, default=50, help='print loss every print_freq iterations')
         parser.add_argument('--display_id', type=int, default=1, help='visdom window id, to disable visdom set id = -1.')
         parser.add_argument('--display_port', type=int, default=8097)
-        parser.add_argument('--relu_slope', type=float, default=0.5)
 
         return parser
 
@@ -179,7 +180,7 @@ class ContrastiveLoss(nn.Module):
 # Networks and Models
 ###############################################################################
 class SiameseNetwork(nn.Module):
-    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64, cnn_dim=[], cnn_pad=1, relu_slope=0.2, use_cxn=True):
+    def __init__(self, base=None, num_classes=3, pooling='avg', cnn_dim=[], cnn_pad=1, cnn_relu_slope=0.5, fc_dim=[], fc_relu_slope=0.2, dropout=0.5, no_cxn=False):
         super(SiameseNetwork, self).__init__()
         assert(num_classes == fc_dim[-1])
         self.pooling = pooling
@@ -194,7 +195,7 @@ class SiameseNetwork(nn.Module):
                 conv_block += [
                     nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=cnn_pad, bias=True),
                     nn.BatchNorm2d(nf),
-                    nn.LeakyReLU(relu_slope)
+                    nn.LeakyReLU(cnn_relu_slope)
                 ]
                 nf_prev = nf
             conv_block += [nn.Conv2d(nf_prev, cnn_dim[-1], kernel_size=3, stride=1, padding=cnn_pad, bias=True)]
@@ -206,9 +207,9 @@ class SiameseNetwork(nn.Module):
         # connection
         cxn_blocks = [
             nn.BatchNorm2d(cnn_dim[-1]),
-            nn.LeakyReLU(relu_slope)
+            nn.LeakyReLU(cnn_relu_slope)
         ]
-        self.cxn = nn.Sequential(*cxn_blocks) if use_cxn else None
+        self.cxn = None if no_cxn else nn.Sequential(*cxn_blocks)
         # fc layers
         fc_blocks = []
         nf_prev = feature_dim * 2
@@ -217,7 +218,7 @@ class SiameseNetwork(nn.Module):
             fc_blocks += [
                 nn.Dropout(dropout),
                 nn.Conv2d(nf_prev, nf, kernel_size=1, stride=1, padding=0, bias=True),
-                nn.LeakyReLU(relu_slope)
+                nn.LeakyReLU(fc_relu_slope)
             ]
             nf_prev = nf
         fc_blocks += [
@@ -267,7 +268,7 @@ class SiameseNetwork(nn.Module):
 
 
 class SiameseFeature(nn.Module):
-    def __init__(self, num_classes=3, base=None, pooling='avg', dropout=0.5, fc_dim=64, cnn_dim=[], cnn_pad=1, relu_slope=0.2):
+    def __init__(self, base=None, pooling='avg', cnn_dim=[], cnn_pad=1, cnn_relu_slope=0.2):
         super(SiameseFeature, self).__init__()
         self.pooling = pooling
         self.base = base
@@ -279,7 +280,7 @@ class SiameseFeature(nn.Module):
                 conv_block += [
                     nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=cnn_pad, bias=True),
                     nn.BatchNorm2d(nf),
-                    nn.LeakyReLU(relu_slope)
+                    nn.LeakyReLU(cnn_relu_slope)
                 ]
                 nf_prev = nf
             conv_block += [nn.Conv2d(nf_prev, cnn_dim[-1], kernel_size=3, stride=1, padding=cnn_pad, bias=True)]
@@ -302,8 +303,9 @@ class SiameseFeature(nn.Module):
 
 
 class AlexNetFeature(nn.Module):
-    def __init__(self, pooling='avg'):
+    def __init__(self, pooling='max'):
         super(AlexNetFeature, self).__init__()
+        self.pooling = pooling
         sequence = [
             nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
             nn.ReLU(inplace=True),
@@ -319,15 +321,15 @@ class AlexNetFeature(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=3, stride=2),
         ]
-        if pooling == 'avg':
-            sequence += [nn.AvgPool2d(kernel_size=6)]
-        elif pooling == 'max':
-            sequence += [nn.MaxPool2d(kernel_size=6)]
         self.features = nn.Sequential(*sequence)
         self.feature_dim = 256
 
     def forward(self, x):
         x = self.features(x)
+        if self.pooling == 'avg':
+            x = nn.AvgPool2d(x.size(2))(x)
+        elif self.pooling == 'max':
+            x = nn.MaxPool2d(x.size(2))(x)
         return x
     
     def load_pretrained(self, state_dict):
@@ -497,9 +499,12 @@ def get_model(opt):
     # define Siamese Network
     # FIXME: SiameseNetwork or SiameseFeature according to opt.mode
     if opt.mode == 'visualize' or opt.mode == 'extract_feature':
-        net = SiameseFeature(opt.num_classes, base, opt.pooling, opt.dropout, opt.fc_dim, opt.cnn_dim, opt.cnn_pad, opt.relu_slope)
+        net = SiameseFeature(base, pooling=opt.pooling,
+                             cnn_dim=opt.cnn_dim, cnn_pad=opt.cnn_pad, cnn_relu_slope=opt.cnn_relu_slope)
     else:
-        net = SiameseNetwork(opt.num_classes, base, opt.pooling, opt.dropout, opt.fc_dim, opt.cnn_dim, opt.cnn_pad, opt.relu_slope, opt.use_cxn)
+        net = SiameseNetwork(base, opt.num_classes, pooling=opt.pooling,
+                             cnn_dim=opt.cnn_dim, cnn_pad=opt.cnn_pad, cnn_relu_slope=opt.cnn_relu_slope,
+                             fc_dim=opt.fc_dim, fc_relu_slope=opt.fc_relu_slope, dropout=opt.dropout, no_cxn=opt.no_cxn)
 
     # initialize | load weights
     if opt.mode == 'train':

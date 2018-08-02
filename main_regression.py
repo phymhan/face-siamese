@@ -216,9 +216,9 @@ class AlexNetLite(nn.Module):
     def forward(self, x):
         x = self.features(x)
         if self.pooling == 'avg':
-            x = nn.AvgPool2d(6)(x)
+            x = nn.AvgPool2d(x.size(2))(x)
         elif self.pooling == 'max':
-            x = nn.MaxPool2d(6)(x)
+            x = nn.MaxPool2d(x.size(2))(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
