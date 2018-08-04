@@ -300,6 +300,16 @@ class SiameseFeature(nn.Module):
         elif self.pooling == 'max':
             output = nn.MaxPool2d(output.size(2))(output)
         return output
+    
+    def load_pretrained(self, state_dict):
+        # load state dict from a SiameseNetwork
+        if isinstance(state_dict, str):
+            state_dict = torch.load(state_dict)
+        # remove cxn and fc
+        for key in list(state_dict.keys()):
+            if key.startswith('cxn') or key.startswith('fc'):
+                state_dict.pop(key)
+        self.load_state_dict(state_dict, strict=True)
 
 
 class AlexNetFeature(nn.Module):
@@ -333,6 +343,7 @@ class AlexNetFeature(nn.Module):
         return x
     
     def load_pretrained(self, state_dict):
+        # invoked when used as `base' in SiameseNetwork
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
         self.load_state_dict(state_dict, strict=False)
@@ -381,6 +392,7 @@ class ResNetFeature(nn.Module):
         return x
     
     def load_pretrained(self, state_dict):
+        # invoked when used as `base' in SiameseNetwork
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
         self.model.load_state_dict(state_dict, strict=False)
@@ -672,9 +684,9 @@ def train(opt, net, dataloader, dataloader_val=None):
             sio.savemat(os.path.join(opt.save_dir, 'mat_loss'), plot_loss)
             sio.savemat(os.path.join(opt.save_dir, 'mat_acc'), plot_acc)
 
-        torch.save(net.state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
+        torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
         if epoch % opt.save_epoch_freq == 0:
-            torch.save(net.state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
+            torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
 
     with open(os.path.join(opt.save_dir, 'loss.txt'), 'w') as f:
         for loss in loss_history:

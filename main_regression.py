@@ -222,16 +222,14 @@ class AlexNetLite(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
-    
+
     def load_pretrained(self, state_dict):
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
-        # do not use self.features.load_state_dict() which will load nothing
-        self.load_state_dict(state_dict, strict=False)
-    
-    def get_finetune_parameters(self):
-        # used when opt.finetune_fc_only is True
-        return self.fc.parameters()
+        for key in list(state_dict.keys()):
+            if key.startswith('fc'):
+                state_dict.pop(key)
+        self.load_state_dict(state_dict, strict=True)
 
 
 class ResNet(nn.Module):
@@ -259,17 +257,16 @@ class ResNet(nn.Module):
             model = resnet152(False)
             model.fc = nn.Linear(512 * 4, num_classes)
         self.model = model
-    
+
     def forward(self, x):
         return self.model(x)
-    
+
     def load_pretrained(self, state_dict):
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
-            if 'fc.weight' in state_dict:
-                del state_dict['fc.weight']
-            if 'fc.bias' in state_dict:
-                del state_dict['fc.bias']
+        for key in list(state_dict.keys()):
+            if key.startswith('fc'):
+                state_dict.pop(key)
         self.model.load_state_dict(state_dict, strict=False)
 
 
