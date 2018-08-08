@@ -3,6 +3,8 @@ import argparse
 import random
 import functools
 import numpy as np
+from scipy import stats
+import scipy.io as sio
 from PIL import Image
 import matplotlib.pyplot as plt
 import torch
@@ -25,6 +27,8 @@ class Options():
         parser.add_argument('--name', type=str, default='exp', help='experiment name')
         parser.add_argument('--dataroot', required=True, default='datasets/UTKFace', help='path to images')
         parser.add_argument('--datafile', type=str, default='', help='text file listing images')
+        parser.add_argument('--dataroot_val', type=str, default='')
+        parser.add_argument('--datafile_val', type=str, default='')
         parser.add_argument('--pretrained_model_path', type=str, default='pretrained_models/alexnet.pth', help='path to pretrained models')
         parser.add_argument('--use_pretrained_model', action='store_true', help='use pretrained model')
         parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
@@ -33,21 +37,24 @@ class Options():
         parser.add_argument('--init_type', type=str, default='normal', help='network initialization [normal|xavier|kaiming|orthogonal]')
         parser.add_argument('--num_classes', type=int, default=10, help='number of classes')
         parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')
-        parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+        parser.add_argument('--batch_size', type=int, default=100, help='batch size')
         parser.add_argument('--lr', type=float, default=0.0002, help='learning rate')
         parser.add_argument('--which_epoch', type=str, default='latest', help='which epoch to load')
         parser.add_argument('--which_model', type=str, default='alexnet', help='which model')
         parser.add_argument('--n_layers', type=int, default=3, help='only used if which_model==n_layers')
         parser.add_argument('--nf', type=int, default=64, help='# of filters in first conv layer')
         parser.add_argument('--pooling', type=str, default='', help='empty: no pooling layer, max: MaxPool, avg: AvgPool')
-        # parser.add_argument('--use_avg_pooling', action='store_true', help='use average pooling after feature extraction')
-        # parser.add_argument('--use_max_pooling', action='store_true', help='use max pooling after feature extraction')
         parser.add_argument('--loadSize', type=int, default=224, help='scale images to this size')
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         parser.add_argument('--age_bins', nargs='+', type=int, default=[1, 11, 21, 31, 41, 51, 61, 71, 81, 91], help='list of bins, the (i+1)-th group is in the range [age_binranges[i], age_binranges[i+1]), e.g. [1, 11, 21, ..., 101], the 1-st group is [1, 10], the 9-th [91, 100], however, the 10-th [101, +inf)')
         parser.add_argument('--weight', nargs='+', type=float, default=[], help='weights for CE')
-        parser.add_argument('--dropout_p', type=float, default=0.5, help='dropout p')
+        parser.add_argument('--dropout', type=float, default=0.5, help='dropout p')
         parser.add_argument('--finetune_fc_only', action='store_true', help='fix feature extraction weights and finetune fc layers only, if True')
+        parser.add_argument('--fc_dim', type=int, nargs='+', default=[3, 3], help='dimension of fc')
+        parser.add_argument('--fc_relu_slope', type=float, default=0.5)
+        parser.add_argument('--print_freq', type=int, default=50, help='print loss every print_freq iterations')
+        parser.add_argument('--display_id', type=int, default=1, help='visdom window id, to disable visdom set id = -1.')
+        parser.add_argument('--display_port', type=int, default=8097)
 
         return parser
 
@@ -227,7 +234,7 @@ class AlexNetLite(nn.Module):
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
         for key in list(state_dict.keys()):
-            if key.startswith('fc'):
+            if key.startswith('classifier'):
                 state_dict.pop(key)
         self.load_state_dict(state_dict, strict=True)
 
@@ -380,6 +387,13 @@ def parse_age_label(fname, binranges):
     return l
 
 
+def get_prediction(score):
+    batch_size = score.size(0)
+    score_cpu = score.detach().cpu().numpy()
+    pred = stats.mode(score_cpu.argmax(axis=1).reshape(batch_size, -1), axis=1)
+    return pred[0].reshape(batch_size)
+
+
 ###############################################################################
 # Main Routines
 ###############################################################################
@@ -389,7 +403,7 @@ def get_model(opt):
     if opt.which_model == 'alexnet':
         net = AlexNet(opt.num_classes)
     elif opt.which_model == 'alexnet_lite':
-        net = AlexNetLite(opt.num_classes, opt.pooling, opt.dropout_p)
+        net = AlexNetLite(opt.num_classes, opt.pooling, opt.dropout)
     elif 'resnet' in opt.which_model:
         net = ResNet(opt.num_classes, opt.which_model)
     elif opt.which_model == 'n_layers':
@@ -435,32 +449,100 @@ def train(opt, net, dataloader):
         param = net.parameters()
     optimizer = optim.Adam(param, lr=opt.lr)
 
-    counter = []
     loss_history = []
-    iteration_number = 0
+    total_iter = 0
+    opt.display_val_acc = not not dataloader_val
+    dataset_size, dataset_size_val = opt.dataset_size, opt.dataset_size_val
+    loss_legend = ['classification']
+    if opt.display_id >= 0:
+        import visdom
+        vis = visdom.Visdom(server='http://localhost', port=opt.display_port)
+        # plot_data = {'X': [], 'Y': [], 'leg': ['loss']}
+        plot_loss = {'X': [], 'Y': [], 'leg': loss_legend}
+        plot_acc = {'X': [], 'Y': [], 'leg': ['train', 'val'] if opt.display_val_acc else ['train']}
 
     for epoch in range(1, opt.num_epochs+1):
+        epoch_cnt = 0
+        pred_train = []
+        target_train = []
+
         for i, data in enumerate(dataloader, 0):
             img0, path0 = data
             label = [parse_age_label(name, opt.age_bins_with_inf) for name in path0]
             label = torch.LongTensor(label)
             if opt.use_gpu:
                 img0, label = img0.cuda(), label.cuda()
+            curr_batch_size = img0.size(0)
+            epoch_cnt += curr_batch_size
+            total_iter += 1
+
             optimizer.zero_grad()
+
             output = net.forward(img0)
             loss = criterion(output, label)
+
+            # get predictions
+            pred_train.append(get_prediction(output))
+            target_train.append(label.cpu().numpy())
+
             loss.backward()
             optimizer.step()
-            if i % 10 == 0:
-                print("Epoch number {}\n Current loss {}\n".format(epoch, loss.item()))
-                iteration_number += 10
-                counter.append(iteration_number)
-                loss_history.append(loss.item())
-        if epoch % opt.save_epoch_freq == 0:
-            torch.save(net.state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
 
-    # save model
-    torch.save(net.state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
+            losses = {'classification': loss.item()}
+            
+            if total_iter % opt.print_freq == 0:
+                print("epoch %02d, iter %06d, loss: %.4f" % (epoch, total_iter, loss.item()))
+                if opt.display_id >= 0:
+                    plot_loss['X'].append(epoch+float(epoch_cnt)/dataset_size)
+                    plot_loss['Y'].append([losses[k] for k in plot_loss['leg']])
+                    vis.line(
+                        X=np.stack([np.array(plot_loss['X'])] * len(plot_loss['leg']), 1),
+                        Y=np.array(plot_loss['Y']),
+                        opts={'title': 'loss', 'legend': plot_loss['leg'], 'xlabel': 'epoch', 'ylabel': 'loss'},
+                        win=opt.display_id)
+                loss_history.append(loss.item())
+        
+        curr_acc = {}
+        # evaluate training
+        err_train = np.count_nonzero(np.concatenate(pred_train) - np.concatenate(target_train)) / dataset_size
+        curr_acc['train'] = 1 - err_train
+
+        # evaluate val
+        if opt.display_val_acc:
+            pred_val = []
+            target_val = []
+            for i, data in enumerate(dataloader_val, 0):
+                img0, path0 = data
+                label = [parse_age_label(name, opt.age_bins_with_inf) for name in path0]
+                label = torch.LongTensor(label)
+                if opt.use_gpu:
+                    img0 = img0.cuda()
+                output = net.forward(img0)
+                pred_val.append(get_prediction(output))
+                target_val.append(label.cpu().numpy())
+            err_val = np.count_nonzero(np.concatenate(pred_val) - np.concatenate(target_val)) / dataset_size_val
+            curr_acc['val'] = 1 - err_val
+        
+        # plot accs
+        if opt.display_id >= 0:
+            plot_acc['X'].append(epoch)
+            plot_acc['Y'].append([curr_acc[k] for k in plot_acc['leg']])
+            vis.line(
+                X=np.stack([np.array(plot_acc['X'])] * len(plot_acc['leg']), 1),
+                Y=np.array(plot_acc['Y']),
+                opts={'title': 'accuracy', 'legend': plot_acc['leg'], 'xlabel': 'epoch', 'ylabel': 'accuracy'},
+                win=opt.display_id+1
+            )
+            sio.savemat(os.path.join(opt.save_dir, 'mat_loss'), plot_loss)
+            sio.savemat(os.path.join(opt.save_dir, 'mat_acc'), plot_acc)
+
+        torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
+        if opt.use_gpu:
+            net.cuda()
+        if epoch % opt.save_epoch_freq == 0:
+            torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
+            if opt.use_gpu:
+                net.cuda()
 
     with open(os.path.join(opt.save_dir, 'loss.txt'), 'w') as f:
         for loss in loss_history:
@@ -534,12 +616,23 @@ if __name__=='__main__':
         # get dataloader
         dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
         dataloader = DataLoader(dataset, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
+        opt.dataset_size = len(dataset)
+        # val dataset
+        if opt.dataroot_val:
+            dataset_val = SingleImageDataset(opt.dataroot_val, opt.datafile_val, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
+            dataloader_val = DataLoader(dataset_val, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
+            opt.dataset_size_val = len(dataset_val)
+        else:
+            dataloader_val = None
+            opt.dataset_size_val = 0
+        print('dataset size = %d' % len(dataset))
         # train
         train(opt, net, dataloader)
     elif opt.mode == 'test':
         # get dataloader
         dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
         dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
+        opt.dataset_size_val = len(dataset)
         # test
         test(opt, net, dataloader)
     elif opt.mode == 'visualize':

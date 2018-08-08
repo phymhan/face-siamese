@@ -36,7 +36,7 @@ class Options():
         parser.add_argument('--init_type', type=str, default='kaiming', help='network initialization [normal|xavier|kaiming|orthogonal]')
         parser.add_argument('--num_classes', type=int, default=3, help='number of classes')
         parser.add_argument('--num_epochs', type=int, default=50, help='number of epochs')
-        parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+        parser.add_argument('--batch_size', type=int, default=100, help='batch size')
         parser.add_argument('--lr', type=float, default=0.0002, help='learning rate')
         parser.add_argument('--which_epoch', type=str, default='latest', help='which epoch to load')
         parser.add_argument('--which_model', type=str, default='resnet18', help='which model')
@@ -346,6 +346,9 @@ class AlexNetFeature(nn.Module):
         # invoked when used as `base' in SiameseNetwork
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
+        for key in list(state_dict.keys()):
+            if key.startswith('classifier'):
+                state_dict.pop(key)
         self.load_state_dict(state_dict, strict=False)
 
 
@@ -685,8 +688,12 @@ def train(opt, net, dataloader, dataloader_val=None):
             sio.savemat(os.path.join(opt.save_dir, 'mat_acc'), plot_acc)
 
         torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
+        if opt.use_gpu:
+            net.cuda()
         if epoch % opt.save_epoch_freq == 0:
             torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
+            if opt.use_gpu:
+                net.cuda()
 
     with open(os.path.join(opt.save_dir, 'loss.txt'), 'w') as f:
         for loss in loss_history:
