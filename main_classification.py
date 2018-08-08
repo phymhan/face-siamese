@@ -499,7 +499,8 @@ def train(opt, net, dataloader):
                         X=np.stack([np.array(plot_loss['X'])] * len(plot_loss['leg']), 1),
                         Y=np.array(plot_loss['Y']),
                         opts={'title': 'loss', 'legend': plot_loss['leg'], 'xlabel': 'epoch', 'ylabel': 'loss'},
-                        win=opt.display_id)
+                        win=opt.display_id
+                    )
                 loss_history.append(loss.item())
         
         curr_acc = {}
