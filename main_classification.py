@@ -2,6 +2,7 @@ import os
 import argparse
 import random
 import functools
+import math
 import numpy as np
 from scipy import stats
 import scipy.io as sio
@@ -449,10 +450,11 @@ def train(opt, net, dataloader):
         param = net.parameters()
     optimizer = optim.Adam(param, lr=opt.lr)
 
+    dataset_size, dataset_size_val = opt.dataset_size, opt.dataset_size_val
     loss_history = []
     total_iter = 0
+    num_iter_per_epoch = math.ceil(dataset_size / opt.batch_size)
     opt.display_val_acc = not not dataloader_val
-    dataset_size, dataset_size_val = opt.dataset_size, opt.dataset_size_val
     loss_legend = ['classification']
     if opt.display_id >= 0:
         import visdom
@@ -462,7 +464,7 @@ def train(opt, net, dataloader):
         plot_acc = {'X': [], 'Y': [], 'leg': ['train', 'val'] if opt.display_val_acc else ['train']}
 
     for epoch in range(1, opt.num_epochs+1):
-        epoch_cnt = 0
+        epoch_iter = 0
         pred_train = []
         target_train = []
 
@@ -472,8 +474,7 @@ def train(opt, net, dataloader):
             label = torch.LongTensor(label)
             if opt.use_gpu:
                 img0, label = img0.cuda(), label.cuda()
-            curr_batch_size = img0.size(0)
-            epoch_cnt += curr_batch_size
+            epoch_iter += 1
             total_iter += 1
 
             optimizer.zero_grad()
@@ -493,7 +494,7 @@ def train(opt, net, dataloader):
             if total_iter % opt.print_freq == 0:
                 print("epoch %02d, iter %06d, loss: %.4f" % (epoch, total_iter, loss.item()))
                 if opt.display_id >= 0:
-                    plot_loss['X'].append(epoch+float(epoch_cnt)/dataset_size)
+                    plot_loss['X'].append(epoch + epoch_iter/num_iter_per_epoch)
                     plot_loss['Y'].append([losses[k] for k in plot_loss['leg']])
                     vis.line(
                         X=np.stack([np.array(plot_loss['X'])] * len(plot_loss['leg']), 1),
