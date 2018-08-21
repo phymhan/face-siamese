@@ -48,14 +48,15 @@ class Options():
         parser.add_argument('--loadSize', type=int, default=224, help='scale images to this size')
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         parser.add_argument('--age_bins', nargs='+', type=int, default=[1, 11, 21, 31, 41, 51, 61, 71, 81, 91], help='list of bins, the (i+1)-th group is in the range [age_binranges[i], age_binranges[i+1]), e.g. [1, 11, 21, ..., 101], the 1-st group is [1, 10], the 9-th [91, 100], however, the 10-th [101, +inf)')
-        parser.add_argument('--weight', nargs='+', type=float, default=[], help='weights for CE')
-        parser.add_argument('--dropout', type=float, default=0.5, help='dropout p')
-        parser.add_argument('--finetune_fc_only', action='store_true', help='fix feature extraction weights and finetune fc layers only, if True')
-        parser.add_argument('--fc_dim', type=int, nargs='+', default=[3, 3], help='dimension of fc')
-        parser.add_argument('--fc_relu_slope', type=float, default=0.5)
         parser.add_argument('--print_freq', type=int, default=50, help='print loss every print_freq iterations')
         parser.add_argument('--display_id', type=int, default=1, help='visdom window id, to disable visdom set id = -1.')
         parser.add_argument('--display_port', type=int, default=8097)
+        parser.add_argument('--delta', type=float, default=0.05)
+        parser.add_argument('--embedding_mean', type=float, default=0)
+        parser.add_argument('--embedding_std', type=float, default=1)
+        parser.add_argument('--cnn_dim', type=int, nargs='+', default=[64, 1], help='cnn kernel dims for feature dimension reduction')
+        parser.add_argument('--cnn_pad', type=int, default=1, help='padding of cnn layers defined by cnn_dim')
+        parser.add_argument('--cnn_relu_slope', type=float, default=0.5)
 
         return parser
 
@@ -67,9 +68,8 @@ class Options():
         assert(self.opt.num_classes == len(self.opt.age_bins))
         # set age_bins
         self.opt.age_bins_with_inf = self.opt.age_bins + [float('inf')]
-        # weight
-        if self.opt.weight:
-            assert(len(self.opt.weight) == self.opt.num_classes)
+        # embedding normalization
+        self.opt.embedding_normalize = lambda x: (x - self.opt.embedding_mean) / self.opt.embedding_std
         self.print_options(self.opt)
         return self.opt
     
@@ -143,62 +143,51 @@ class SingleImageDataset(Dataset):
 ###############################################################################
 # Networks and Models
 ###############################################################################
-# models: alexnet, alexnet+gap, nlayerclassifier
-class AlexNet(nn.Module):
-    def __init__(self, num_classes=1000):
-        super(AlexNet, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(64, 192, kernel_size=5, padding=2),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(192, 384, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(384, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
-        )
-        self.classifier = nn.Sequential(
-            nn.Dropout(),
-            nn.Linear(256 * 6 * 6, 4096),
-            nn.ReLU(inplace=True),
-            nn.Dropout(),
-            nn.Linear(4096, 4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, num_classes),
-        )
+class RegressionNetwork(nn.Module):
+    def __init__(self, base=None, pooling='avg', cnn_dim=[], cnn_pad=1, cnn_relu_slope=0.2):
+        super(RegressionNetwork, self).__init__()
+        self.pooling = pooling
+        self.base = base
+        if cnn_dim:
+            conv_block = []
+            nf_prev = base.feature_dim
+            for i in range(len(cnn_dim)-1):
+                nf = cnn_dim[i]
+                conv_block += [
+                    nn.Conv2d(nf_prev, nf, kernel_size=3, stride=1, padding=cnn_pad, bias=True),
+                    nn.BatchNorm2d(nf),
+                    nn.LeakyReLU(cnn_relu_slope)
+                ]
+                nf_prev = nf
+            conv_block += [nn.Conv2d(nf_prev, cnn_dim[-1], kernel_size=3, stride=1, padding=cnn_pad, bias=True)]
+            self.cnn = nn.Sequential(*conv_block)
+            feature_dim = cnn_dim[-1]
+        else:
+            self.cnn = None
+            feature_dim = base.feature_dim
+        self.feature_dim = feature_dim
 
     def forward(self, x):
-        x = self.features(x)
-        x = x.view(x.size(0), 256 * 6 * 6)
-        x = self.classifier(x)
-        return x
-    
+        output = self.base.forward(x)
+        if self.cnn:
+            output = self.cnn(output)
+        if self.pooling == 'avg':
+            output = nn.AvgPool2d(output.size(2))(output)
+        elif self.pooling == 'max':
+            output = nn.MaxPool2d(output.size(2))(output)
+        return output
+
     def load_pretrained(self, state_dict):
-        if isinstance(state_dict, str):
-            state_dict = torch.load(state_dict)
-        if 'classifier.6.weight' in state_dict:
-            del state_dict['classifier.6.weight']
-        if 'classifier.6.bias' in state_dict:
-            del state_dict['classifier.6.bias']
-        self.load_state_dict(state_dict, strict=False)
-    
-    def get_finetune_parameters(self):
-        # used when opt.finetune_fc_only is True
-        return self.classifier.parameters()
+        # used when loading pretrained base model
+        # warning: self.cnn won't be initialized
+        self.base.load_pretrained(state_dict)
 
 
-# a lighter alexnet, with fewer params in fc layers
-class AlexNetLite(nn.Module):
-    def __init__(self, num_classes=10, pooling='avg', dropout=0.5):
-        super(AlexNetLite, self).__init__()
+class AlexNetFeature(nn.Module):
+    def __init__(self, pooling='max'):
+        super(AlexNetFeature, self).__init__()
         self.pooling = pooling
-        fw = 1 if pooling else 6
-        self.features = nn.Sequential(
+        sequence = [
             nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=3, stride=2),
@@ -212,14 +201,9 @@ class AlexNetLite(nn.Module):
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=3, stride=2),
-        )
-        self.fc = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(256 * fw * fw, 64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(64, num_classes),
-        )
+        ]
+        self.features = nn.Sequential(*sequence)
+        self.feature_dim = 256
 
     def forward(self, x):
         x = self.features(x)
@@ -227,126 +211,65 @@ class AlexNetLite(nn.Module):
             x = nn.AvgPool2d(x.size(2))(x)
         elif self.pooling == 'max':
             x = nn.MaxPool2d(x.size(2))(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
         return x
-
+    
     def load_pretrained(self, state_dict):
+        # invoked when used as `base' in SiameseNetwork
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
         for key in list(state_dict.keys()):
             if key.startswith('classifier'):
                 state_dict.pop(key)
-        self.load_state_dict(state_dict, strict=True)
+        self.load_state_dict(state_dict, strict=False)
 
 
-class ResNet(nn.Module):
-    def __init__(self, num_classes, which_model):
-        super(ResNet, self).__init__()
+class ResNetFeature(nn.Module):
+    def __init__(self, which_model):
+        super(ResNetFeature, self).__init__()
         model = None
+        feature_dim = None
         if which_model == 'resnet18':
             from torchvision.models import resnet18
             model = resnet18(False)
-            model.fc = nn.Linear(512 * 1, num_classes)
+            feature_dim = 512 * 1
         elif which_model == 'resnet34':
             from torchvision.models import resnet34
             model = resnet34(False)
-            model.fc = nn.Linear(512 * 1, num_classes)
+            feature_dim = 512 * 1
         elif which_model == 'resnet50':
             from torchvision.models import resnet50
             model = resnet50(False)
-            model.fc = nn.Linear(512 * 4, num_classes)
+            feature_dim = 512 * 4
         elif which_model == 'resnet101':
             from torchvision.models import resnet101
             model = resnet101(False)
-            model.fc = nn.Linear(512 * 4, num_classes)
+            feature_dim = 512 * 4
         elif which_model == 'resnet152':
             from torchvision.models import resnet152
             model = resnet152(False)
-            model.fc = nn.Linear(512 * 4, num_classes)
+            feature_dim = 512 * 4
+        delattr(model, 'fc')
         self.model = model
+        self.feature_dim = feature_dim
 
     def forward(self, x):
-        return self.model(x)
+        x = self.model.conv1(x)
+        x = self.model.bn1(x)
+        x = self.model.relu(x)
+        x = self.model.maxpool(x)
 
+        x = self.model.layer1(x)
+        x = self.model.layer2(x)
+        x = self.model.layer3(x)
+        x = self.model.layer4(x)
+
+        return x
+    
     def load_pretrained(self, state_dict):
+        # invoked when used as `base' in SiameseNetwork
         if isinstance(state_dict, str):
             state_dict = torch.load(state_dict)
-        for key in list(state_dict.keys()):
-            if key.startswith('fc'):
-                state_dict.pop(key)
         self.model.load_state_dict(state_dict, strict=False)
-
-
-# borrowed from NLayerDiscriminator in pix2pix-cyclegan
-class NLayerClassifier(nn.Module):
-    def __init__(self, num_classes=10, nf=64, n_layers=3, norm_layer=nn.BatchNorm2d):
-        super(NLayerClassifier, self).__init__()
-        input_nc = 3
-        if type(norm_layer) == functools.partial:
-            use_bias = norm_layer.func == nn.InstanceNorm2d
-        else:
-            use_bias = norm_layer == nn.InstanceNorm2d
-
-        kw = 4
-        padw = 1
-        sequence = [
-            nn.Conv2d(input_nc, nf, kernel_size=kw, stride=2, padding=padw),
-            nn.LeakyReLU(0.2, True)
-        ]
-
-        nf_mult = 1
-        nf_mult_prev = 1
-        for n in range(1, n_layers):
-            nf_mult_prev = nf_mult
-            nf_mult = min(2**n, 8)
-            sequence += [
-                nn.Conv2d(nf * nf_mult_prev, nf * nf_mult,
-                          kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-                norm_layer(nf * nf_mult),
-                nn.LeakyReLU(0.2, True)
-            ]
-
-        nf_mult_prev = nf_mult
-        nf_mult = min(2**n_layers, 8)
-        sequence += [
-            nn.Conv2d(nf * nf_mult_prev, nf * nf_mult,
-                      kernel_size=kw, stride=1, padding=padw, bias=use_bias),
-            norm_layer(nf * nf_mult),
-            nn.LeakyReLU(0.2, True)
-        ]
-
-        self.features = nn.Sequential(*sequence)
-
-        sequence = [
-            nn.Conv2d(nf * nf_mult, num_classes, kernel_size=1, stride=1, padding=0),
-        ]
-
-        self.classifier = nn.Sequential(*sequence)
-
-    def forward(self, x):
-        x = self.features(x)
-        # print(x.size())
-        y = nn.AvgPool2d(x.size(2))(x)  # x.size(2)==x.size(3)
-        y = self.classifier(y)
-        return y.view(y.size(0), -1)
-
-
-class ContrastiveLoss(torch.nn.Module):
-    """
-    Contrastive loss function.
-    Based on: http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
-    """
-
-    def __init__(self, margin=2.0):
-        super(ContrastiveLoss, self).__init__()
-        self.margin = margin
-
-    def forward(self, output1, output2, label):
-        euclidean_distance = F.pairwise_distance(output1, output2)
-        loss_contrastive = torch.mean((1-label) * torch.pow(euclidean_distance, 2) +
-                                      (label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
-        return loss_contrastive
 
 
 ###############################################################################
@@ -378,7 +301,7 @@ def weights_init(m):
         m.bias.data.fill_(0)
 
 
-def get_age_label(fname, binranges):
+def parse_age_label(fname, binranges):
     strlist = fname.split('_')
     age = float(strlist[0])
     l = None
@@ -388,6 +311,12 @@ def get_age_label(fname, binranges):
     return l
 
 
+def get_age(fname):
+    strlist = fname.split('_')
+    age = float(strlist[0])
+    return age
+
+
 def get_prediction(score):
     batch_size = score.size(0)
     score_cpu = score.detach().cpu().numpy()
@@ -395,33 +324,39 @@ def get_prediction(score):
     return pred[0].reshape(batch_size)
 
 
+def get_accuracy(pred, target, delta):
+    acc = torch.abs(pred.cpu() - target.cpu()) < delta
+    return acc.view(-1).numpy()
+
+
 ###############################################################################
 # Main Routines
 ###############################################################################
 def get_model(opt):
-    # define model
-    net = None
+    # define base model
+    base = None
     if opt.which_model == 'alexnet':
-        net = AlexNet(opt.num_classes)
-    elif opt.which_model == 'alexnet_lite':
-        net = AlexNetLite(opt.num_classes, opt.pooling, opt.dropout)
+        base = AlexNetFeature(pooling='')
     elif 'resnet' in opt.which_model:
-        net = ResNet(opt.num_classes, opt.which_model)
-    elif opt.which_model == 'n_layers':
-        net = NLayerClassifier(num_classes=opt.num_classes, nf=opt.nf, n_layers=opt.n_layers)
+        base = ResNetFeature(opt.which_model)
     else:
         raise NotImplementedError('Model [%s] is not implemented.' % opt.which_model)
     
+    # define Siamese Network
+    net = RegressionNetwork(base, pooling=opt.pooling,
+                            cnn_dim=opt.cnn_dim, cnn_pad=opt.cnn_pad, cnn_relu_slope=opt.cnn_relu_slope)
+
     # initialize | load weights
     if opt.mode == 'train':
         net.apply(weights_init)
-        if opt.use_pretrained_model:
+        if opt.pretrained_model_path:
             if isinstance(net, torch.nn.DataParallel):
                 net.module.load_pretrained(opt.pretrained_model_path)
             else:
                 net.load_pretrained(opt.pretrained_model_path)
     else:
-        net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))))
+        # HACK: strict=False
+        net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))), strict=False)
         net.eval()
     
     if opt.use_gpu:
@@ -431,31 +366,18 @@ def get_model(opt):
 
 # Routines for training
 def train(opt, net, dataloader):
-    if len(opt.weight):
-        opt.weight = torch.Tensor(opt.weight)
-        if opt.use_gpu:
-            opt.weight = opt.weight.cuda()
-        criterion = torch.nn.CrossEntropyLoss(weight=opt.weight)
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.MSELoss()
     opt.save_dir = os.path.join(opt.checkpoint_dir, opt.name)
     if not os.path.exists(opt.save_dir):
         os.makedirs(opt.save_dir)
-    if opt.finetune_fc_only:
-        if isinstance(net, nn.DataParallel):
-            param = net.module.get_finetune_parameters()
-        else:
-            param = net.get_finetune_parameters()
-    else:
-        param = net.parameters()
-    optimizer = optim.Adam(param, lr=opt.lr)
+    optimizer = optim.Adam(net.parameters(), lr=opt.lr)
 
     dataset_size, dataset_size_val = opt.dataset_size, opt.dataset_size_val
     loss_history = []
     total_iter = 0
     num_iter_per_epoch = math.ceil(dataset_size / opt.batch_size)
     opt.display_val_acc = not not dataloader_val
-    loss_legend = ['classification']
+    loss_legend = ['regression']
     if opt.display_id >= 0:
         import visdom
         vis = visdom.Visdom(server='http://localhost', port=opt.display_port)
@@ -465,13 +387,16 @@ def train(opt, net, dataloader):
 
     for epoch in range(1, opt.num_epochs+1):
         epoch_iter = 0
-        pred_train = []
-        target_train = []
+        acc_train = []
 
         for i, data in enumerate(dataloader, 0):
             img0, path0 = data
-            label = [get_age_label(name, opt.age_bins_with_inf) for name in path0]
-            label = torch.LongTensor(label)
+            label = [get_age(name) for name in path0]
+            label = torch.FloatTensor(label).view(img0.size(0), net.feature_dim, 1, 1)
+
+            # normalize label only
+            label = opt.embedding_normalize(label)
+
             if opt.use_gpu:
                 img0, label = img0.cuda(), label.cuda()
             epoch_iter += 1
@@ -483,13 +408,12 @@ def train(opt, net, dataloader):
             loss = criterion(output, label)
 
             # get predictions
-            pred_train.append(get_prediction(output))
-            target_train.append(label.cpu().numpy())
+            acc_train.append(get_accuracy(output, label, opt.delta))
 
             loss.backward()
             optimizer.step()
 
-            losses = {'classification': loss.item()}
+            losses = {'regression': loss.item()}
             
             if total_iter % opt.print_freq == 0:
                 print("epoch %02d, iter %06d, loss: %.4f" % (epoch, total_iter, loss.item()))
@@ -506,24 +430,24 @@ def train(opt, net, dataloader):
         
         curr_acc = {}
         # evaluate training
-        err_train = np.count_nonzero(np.concatenate(pred_train) - np.concatenate(target_train)) / dataset_size
-        curr_acc['train'] = 1 - err_train
+        curr_acc['train'] = np.count_nonzero(np.concatenate(acc_train)) / dataset_size
 
         # evaluate val
         if opt.display_val_acc:
-            pred_val = []
-            target_val = []
+            acc_val = []
             for i, data in enumerate(dataloader_val, 0):
                 img0, path0 = data
-                label = [get_age_label(name, opt.age_bins_with_inf) for name in path0]
-                label = torch.LongTensor(label)
+                label = [get_age(name) for name in path0]
+                label = torch.FloatTensor(label).view(img0.size(0), net.feature_dim, 1, 1)
+
+                # normalize label only
+                label = opt.embedding_normalize(label)
+
                 if opt.use_gpu:
                     img0 = img0.cuda()
                 output = net.forward(img0)
-                pred_val.append(get_prediction(output))
-                target_val.append(label.cpu().numpy())
-            err_val = np.count_nonzero(np.concatenate(pred_val) - np.concatenate(target_val)) / dataset_size_val
-            curr_acc['val'] = 1 - err_val
+                acc_val.append(get_accuracy(output, label, opt.delta))
+            curr_acc['val'] = np.count_nonzero(np.concatenate(acc_val)) / dataset_size_val
         
         # plot accs
         if opt.display_id >= 0:
@@ -552,26 +476,24 @@ def train(opt, net, dataloader):
     # show_plot(counter, loss_history)
 
 
-# Routines for testing
-def test(opt, net, dataloader):
-    pred = []
-    target = []
-    acc = 0
-    for i, data in enumerate(dataloader, 0):
+# Routines for visualization
+def visualize(opt, net, dataloader):
+    features = []
+    labels = []
+    for _, data in enumerate(dataloader, 0):
         img0, path0 = data
-        label = [get_age_label(name, opt.age_bins_with_inf) for name in path0]
-        label = torch.LongTensor(label)
         if opt.use_gpu:
-            img0, label = img0.cuda(), label.cuda()
-        output = net.forward(img0)
-        target.append(label.cpu().detach().numpy().squeeze())
-        pred.append(output.cpu().detach().numpy().squeeze().argmax())
-        if target[-1] == pred[-1]:
-            acc += 1
-        print('--> image #%d: target %d   pred %d' % (i+1, target[-1], pred[-1]))
+            img0 = img0.cuda()
+        feature = net.forward(img0)
+        feature = feature.cpu().detach().numpy()
+        features.append(feature.reshape([1, net.feature_dim]))
+        labels.append(get_age(path0[0]))
+        print('--> %s' % path0[0])
 
-    print('================================================================================')
-    print('accuracy: %.6f' % (100. * acc/len(pred)))
+    X = np.concatenate(features, axis=0)
+    labels = np.array(labels)
+    np.save(os.path.join(opt.checkpoint_dir, opt.name, 'features.npy'), X)
+    np.save(os.path.join(opt.checkpoint_dir, opt.name, 'labels.npy'), labels)
 
 
 ###############################################################################
@@ -601,12 +523,11 @@ if __name__=='__main__':
         print('dataset size = %d' % len(dataset))
         # train
         train(opt, net, dataloader)
-    elif opt.mode == 'test':
+    elif opt.mode == 'visualize':
         # get dataloader
         dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
-        dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
-        opt.dataset_size_val = len(dataset)
-        # test
-        test(opt, net, dataloader)
+        dataloader = DataLoader(dataset, shuffle=False, num_workers=0, batch_size=1)
+        # visualize
+        visualize(opt, net, dataloader)
     else:
         raise NotImplementedError('Mode [%s] is not implemented.' % opt.mode)

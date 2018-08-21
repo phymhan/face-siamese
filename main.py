@@ -478,9 +478,9 @@ def weights_init(m):
         m.bias.data.fill_(0)
 
 
-def parse_age_label(fname, binranges):
+def get_age_label(fname, binranges):
     strlist = fname.split('_')
-    age = int(strlist[0])
+    age = float(strlist[0])
     l = None
     for l in range(len(binranges)-1):
         if (age >= binranges[l]) and (age < binranges[l+1]):
@@ -750,7 +750,7 @@ def visualize(opt, net, dataloader):
             feature = net.forward(img0)
         feature = feature.cpu().detach().numpy()
         features.append(feature.reshape([1, net.feature_dim]))
-        labels.append(parse_age_label(path0[0], opt.age_bins_with_inf))
+        labels.append(get_age_label(path0[0], opt.age_bins_with_inf))
         # np.save('features/%s' % (path0[0].replace('.jpg', '.npy')), feature)
         print('--> %s' % path0[0])
 
@@ -771,7 +771,7 @@ def extract_feature(opt, net, dataloader):
         feature = net.forward(img0)
         feature = feature.cpu().detach().numpy()
         features.append(feature)
-        labels.append(parse_age_label(path0[0], opt.age_bins_with_inf))
+        labels.append(get_age_label(path0[0], opt.age_bins_with_inf))
         print('--> %s' % path0[0])
 
     X = np.concatenate(features, axis=0)
@@ -826,7 +826,7 @@ if __name__=='__main__':
         # get dataloader
         dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
         dataloader = DataLoader(dataset, shuffle=False, num_workers=0, batch_size=1)
-        # test
+        # visualize
         visualize(opt, net, dataloader)
     elif opt.mode == 'extract_feature':
         # get dataloader
