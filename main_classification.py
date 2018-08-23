@@ -56,6 +56,11 @@ class Options():
         parser.add_argument('--print_freq', type=int, default=50, help='print loss every print_freq iterations')
         parser.add_argument('--display_id', type=int, default=1, help='visdom window id, to disable visdom set id = -1.')
         parser.add_argument('--display_port', type=int, default=8097)
+        parser.add_argument('--transforms', type=str, default='resize_and_crop', help='scaling and cropping of images at load time [resize_and_crop|crop|scale_width|scale_width_and_crop]')
+        parser.add_argument('--affineScale', nargs='+', type=float, default=[0.95, 1.05], help='scale tuple in transforms.RandomAffine')
+        parser.add_argument('--affineDegrees', type=float, default=5, help='range of degrees in transforms.RandomAffine')
+        parser.add_argument('--use_color_jitter', action='store_true', help='if specified, add color jitter in transforms')
+        parser.add_argument('--no_flip', action='store_true', help='if specified, do not flip the images for data augmentation')
 
         return parser
 
@@ -64,6 +69,7 @@ class Options():
         self.parser = self.initialize(parser)
         self.opt = self.parser.parse_args()
         self.opt.use_gpu = len(self.opt.gpu_ids) > 0 and torch.cuda.is_available()
+        self.opt.isTrain = self.opt.mode == 'train'
         assert(self.opt.num_classes == len(self.opt.age_bins))
         # set age_bins
         self.opt.age_bins_with_inf = self.opt.age_bins + [float('inf')]
@@ -429,6 +435,48 @@ def get_model(opt):
     return net
 
 
+def get_transform(opt):
+    transform_list = []
+    if opt.transforms == 'resize_and_crop':
+        osize = [opt.loadSize, opt.loadSize]
+        transform_list.append(transforms.Resize(osize, Image.BICUBIC))
+        transform_list.append(transforms.RandomCrop(opt.fineSize))
+    elif opt.transforms == 'crop':
+        transform_list.append(transforms.RandomCrop(opt.fineSize))
+    elif opt.transforms == 'scale_width':
+        transform_list.append(transforms.Lambda(
+            lambda img: __scale_width(img, opt.fineSize)))
+    elif opt.transforms == 'scale_width_and_crop':
+        transform_list.append(transforms.Lambda(
+            lambda img: __scale_width(img, opt.loadSize)))
+        transform_list.append(transforms.RandomCrop(opt.fineSize))
+    elif opt.transforms == 'none':
+        transform_list.append(transforms.Lambda(
+            lambda img: __adjust(img)))
+    elif opt.transforms == 'resize_affine_crop':
+        transform_list.append(transforms.Resize([opt.loadSize, opt.loadSize], Image.BICUBIC))
+        transform_list.append(transforms.RandomAffine(degrees=opt.affineDegrees, scale=tuple(opt.affineScale),
+                                                      resample=Image.BICUBIC, fillcolor=127))
+        transform_list.append(transforms.RandomCrop(opt.fineSize))
+    elif opt.transforms == 'resize_affine_center':
+        transform_list.append(transforms.Resize([opt.loadSize, opt.loadSize], Image.BICUBIC))
+        transform_list.append(transforms.RandomAffine(degrees=opt.affineDegrees, scale=tuple(opt.affineScale),
+                                                      resample=Image.BICUBIC, fillcolor=127))
+        transform_list.append(transforms.CenterCrop(opt.fineSize))
+    else:
+        raise ValueError('--resize_or_crop %s is not a valid option.' % opt.transforms)
+
+    if opt.isTrain and not opt.no_flip:
+        transform_list.append(transforms.RandomHorizontalFlip())
+
+    if opt.isTrain and opt.use_color_jitter:
+        transform_list.append(transforms.ColorJitter())  # TODO
+
+    transform_list += [transforms.ToTensor(),
+                       transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]
+    return transforms.Compose(transform_list)
+
+
 # Routines for training
 def train(opt, net, dataloader):
     if len(opt.weight):
@@ -587,12 +635,12 @@ if __name__=='__main__':
 
     if opt.mode == 'train':
         # get dataloader
-        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=get_transform(opt))
         dataloader = DataLoader(dataset, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
         opt.dataset_size = len(dataset)
         # val dataset
         if opt.dataroot_val:
-            dataset_val = SingleImageDataset(opt.dataroot_val, opt.datafile_val, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
+            dataset_val = SingleImageDataset(opt.dataroot_val, opt.datafile_val, transform=get_transform(opt))
             dataloader_val = DataLoader(dataset_val, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
             opt.dataset_size_val = len(dataset_val)
         else:
@@ -603,7 +651,7 @@ if __name__=='__main__':
         train(opt, net, dataloader)
     elif opt.mode == 'test':
         # get dataloader
-        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=transforms.Compose([transforms.Resize((opt.loadSize, opt.loadSize)), transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]))
+        dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=get_transform(opt))
         dataloader = DataLoader(dataset, shuffle=False, num_workers=1, batch_size=1)
         opt.dataset_size_val = len(dataset)
         # test
