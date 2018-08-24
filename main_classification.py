@@ -46,6 +46,7 @@ class Options():
         parser.add_argument('--nf', type=int, default=64, help='# of filters in first conv layer')
         parser.add_argument('--pooling', type=str, default='', help='empty: no pooling layer, max: MaxPool, avg: AvgPool')
         parser.add_argument('--loadSize', type=int, default=224, help='scale images to this size')
+        parser.add_argument('--fineSize', type=int, default=224, help='scale images to this size')
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
         parser.add_argument('--age_bins', nargs='+', type=int, default=[1, 11, 21, 31, 41, 51, 61, 71, 81, 91], help='list of bins, the (i+1)-th group is in the range [age_binranges[i], age_binranges[i+1]), e.g. [1, 11, 21, ..., 101], the 1-st group is [1, 10], the 9-th [91, 100], however, the 10-th [101, +inf)')
         parser.add_argument('--weight', nargs='+', type=float, default=[], help='weights for CE')
