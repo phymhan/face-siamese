@@ -67,6 +67,8 @@ class Options():
         parser.add_argument('--affineDegrees', type=float, default=5, help='range of degrees in transforms.RandomAffine')
         parser.add_argument('--use_color_jitter', action='store_true', help='if specified, add color jitter in transforms')
         parser.add_argument('--no_flip', action='store_true', help='if specified, do not flip the images for data augmentation')
+        parser.add_argument('--continue_train', action='store_true')
+        parser.add_argument('--epoch_count', type=int, default=1, help='starting epoch')
 
         return parser
 
@@ -530,7 +532,7 @@ def get_model(opt):
                              fc_dim=opt.fc_dim, fc_relu_slope=opt.fc_relu_slope, dropout=opt.dropout, no_cxn=opt.no_cxn)
 
     # initialize | load weights
-    if opt.mode == 'train':
+    if opt.mode == 'train' and not opt.continue_train:
         net.apply(weights_init)
         if opt.pretrained_model_path:
             if isinstance(net, torch.nn.DataParallel):
@@ -540,6 +542,8 @@ def get_model(opt):
     else:
         # HACK: strict=False
         net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))), strict=False)
+    
+    if opt.mode != 'train':
         net.eval()
     
     if opt.use_gpu:

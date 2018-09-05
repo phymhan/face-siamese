@@ -5,6 +5,7 @@ import functools
 import math
 import numpy as np
 from scipy import stats
+import scipy
 import scipy.io as sio
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -62,6 +63,8 @@ class Options():
         parser.add_argument('--affineDegrees', type=float, default=5, help='range of degrees in transforms.RandomAffine')
         parser.add_argument('--use_color_jitter', action='store_true', help='if specified, add color jitter in transforms')
         parser.add_argument('--no_flip', action='store_true', help='if specified, do not flip the images for data augmentation')
+        parser.add_argument('--continue_train', action='store_true')
+        parser.add_argument('--epoch_count', type=int, default=1, help='starting epoch')
 
         return parser
 
@@ -275,6 +278,23 @@ class ResNet(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+    
+    def get_activation_map(self, x):
+        x = self.model.conv1(x)
+        x = self.model.bn1(x)
+        x = self.model.relu(x)
+        x = self.model.maxpool(x)
+        x = self.model.layer1(x)
+        x = self.model.layer2(x)
+        x = self.model.layer3(x)
+        x = self.model.layer4(x)
+
+        weight = self.model.fc.weight.data.clone()
+        weight = weight.view(weight.size(0), weight.size(1), 1, 1)
+
+        x = torch.nn.functional.conv2d(x, weight)
+
+        return x
 
     def load_pretrained(self, state_dict):
         if isinstance(state_dict, str):
@@ -420,7 +440,7 @@ def get_model(opt):
         raise NotImplementedError('Model [%s] is not implemented.' % opt.which_model)
     
     # initialize | load weights
-    if opt.mode == 'train':
+    if opt.mode == 'train' and not opt.continue_train:
         net.apply(weights_init)
         if opt.use_pretrained_model:
             if isinstance(net, torch.nn.DataParallel):
@@ -429,6 +449,8 @@ def get_model(opt):
                 net.load_pretrained(opt.pretrained_model_path)
     else:
         net.load_state_dict(torch.load(os.path.join(opt.checkpoint_dir, opt.name, '{}_net.pth'.format(opt.which_epoch))))
+    
+    if opt.mode != 'train':
         net.eval()
     
     if opt.use_gpu:
@@ -490,6 +512,8 @@ def train(opt, net, dataloader):
     opt.save_dir = os.path.join(opt.checkpoint_dir, opt.name)
     if not os.path.exists(opt.save_dir):
         os.makedirs(opt.save_dir)
+    if not os.path.exists(os.path.join(opt.save_dir, 'img')):
+        os.makedirs(os.path.join(opt.save_dir, 'img'))
     if opt.finetune_fc_only:
         if isinstance(net, nn.DataParallel):
             param = net.module.get_finetune_parameters()
@@ -512,7 +536,7 @@ def train(opt, net, dataloader):
         plot_loss = {'X': [], 'Y': [], 'leg': loss_legend}
         plot_acc = {'X': [], 'Y': [], 'leg': ['train', 'val'] if opt.display_val_acc else ['train']}
 
-    for epoch in range(1, opt.num_epochs+1):
+    for epoch in range(opt.epoch_count, opt.num_epochs+opt.epoch_count):
         epoch_iter = 0
         pred_train = []
         target_train = []
@@ -551,6 +575,28 @@ def train(opt, net, dataloader):
                         opts={'title': 'loss', 'legend': plot_loss['leg'], 'xlabel': 'epoch', 'ylabel': 'loss'},
                         win=opt.display_id
                     )
+
+                    image_size = img0.size(2)
+                    img = img0[0].cpu().numpy().transpose((1, 2, 0))
+                    img = (img * np.array([0.2023, 0.1994, 0.2010]) + np.array([0.4914, 0.4822, 0.4465])) * 255
+                    activations = net.get_activation_map(img0[0:1, ...])
+                    images = activations.view(5, 1, 7, 7)
+                    images = (images-images.min())/(images.max()-images.min())*255
+                    images = torch.nn.functional.interpolate(input=images, size=(image_size, image_size), mode='bilinear', align_corners=True)
+                    # vis.images(images, win=opt.display_id+10)
+
+                    images = images.detach().cpu().numpy()
+                    images = [img] + [np.tile(images[i, 0, ...].reshape((image_size, image_size, 1)), (1, 1, 3)) for i in range(5)]
+                    vis.images([image.transpose((2, 0, 1)) for image in images], win=opt.display_id+10)
+
+                    # save concatenated images
+                    pad = np.zeros((image_size, 4, 3))
+                    images_pad = []
+                    for image in images:
+                        images_pad.append(image)
+                        images_pad.append(pad)
+                    scipy.misc.imsave(os.path.join(opt.save_dir, 'img', 'ep%02d_it%06d.png'%(epoch, total_iter)), np.concatenate(images_pad, axis=1))
+
                 loss_history.append(loss.item())
         
         curr_acc = {}
