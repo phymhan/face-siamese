@@ -69,6 +69,10 @@ class Options():
         parser.add_argument('--no_flip', action='store_true', help='if specified, do not flip the images for data augmentation')
         parser.add_argument('--continue_train', action='store_true')
         parser.add_argument('--epoch_count', type=int, default=1, help='starting epoch')
+        parser.add_argument('--min_kept', type=int, default=1)
+        parser.add_argument('--max_kept', type=int, default=-1)
+        parser.add_argument('--online_sourcefile', type=str, default='online.txt')
+        parser.add_argument('--save_latest_freq', type=int, default=10, help='frequency of saving the latest results')
 
         return parser
 
@@ -83,6 +87,14 @@ class Options():
         # weight
         if self.opt.weight:
             assert(len(self.opt.weight) == self.opt.num_classes)
+        # min_kept, max_kept
+        if self.opt.max_kept < 0:
+            self.opt.max_kept = self.opt.batch_size
+        # num_epochs set to 1
+        self.opt.num_epochs = 1
+        # online_sourcefile
+        if os.path.exists(os.path.join(self.opt.checkpoint_dir, self.opt.name, self.opt.online_sourcefile)):
+            os.remove(os.path.join(self.opt.checkpoint_dir, self.opt.name, self.opt.online_sourcefile))
         if self.opt.mode == 'train':
             self.print_options(self.opt)
         return self.opt
@@ -128,11 +140,9 @@ class SiameseNetworkDataset(Dataset):
         if self.transform is not None:
             imgA = self.transform(imgA)
             imgB = self.transform(imgB)
-        return imgA, imgB, torch.LongTensor(1).fill_(label).squeeze()
+        return imgA, imgB, torch.LongTensor(1).fill_(label).squeeze(), self.source_file[index]
 
     def __len__(self):
-        # # shuffle source file
-        # random.shuffle(self.source_file)
         return len(self.source_file)
 
 
@@ -159,6 +169,67 @@ class SingleImageDataset(Dataset):
 ###############################################################################
 # Loss Functions
 ###############################################################################
+# PairSelector borrowed from https://github.com/adambielski/siamese-triplet
+# remark: in Adam's implementation, a batch of embeddings is first computed
+# and then all possible combination of pairs are taken into consideration,
+# while in this implementation, pairs are pre-generated/provided from outside,
+# which gives more control over the pair-generation process.
+
+class PairSelector:
+    """
+    returns indices (along Batch dimension) of pairs
+    """
+
+    def __init__(self):
+        pass
+    
+    def get_pairs(self, scores, embeddingA, embeddingB):
+        raise NotImplementedError
+
+
+class RandomPairSelector(PairSelector):
+    """
+    Randomly selects pairs that are not equal in age
+    """
+
+    def __init__(self, min_kept=0, max_kept=0):
+        super(RandomPairSelector, self).__init__()
+        self._min_kept = min_kept
+        self._max_kept = max_kept
+
+    def get_pairs(self, scores, embeddingA=None, embeddingB=None):
+        N = scores.size(0) * scores.size(2) * scores.size(3)
+        scores = scores.detach().cpu().data.numpy()
+        pred = scores.transpose((0, 2, 3, 1)).reshape(N, -1).argmax(axis=1)
+        valid_inds = np.where(pred != 1)[0]
+        if len(valid_inds) < self._min_kept:
+            invalid_inds = np.where(pred == 1)[0]
+            np.random.shuffle(invalid_inds)
+            valid_inds = np.concatenate((valid_inds, invalid_inds[:self._min_kept-len(valid_inds)]))
+        np.random.shuffle(valid_inds)
+        selected_inds = valid_inds[:self._max_kept]
+        selected_inds = torch.LongTensor(selected_inds)
+        return selected_inds
+
+
+class OnlineCrossEntropyLoss(nn.Module):
+    def __init__(self, pair_selector=None):
+        super(OnlineCrossEntropyLoss, self).__init__()
+        self.pair_selector = pair_selector
+        self.criterion = nn.CrossEntropyLoss(weight=None)
+
+    def __call__(self, input, target):
+        N = input.size(0) * input.size(2) * input.size(3)
+        target = target.reshape(input.size(0), 1, 1).expand(input.size(0), input.size(2), input.size(3))
+        selected_pairs = self.pair_selector.get_pairs(input, None, None)
+        if input.is_cuda:
+            selected_pairs = selected_pairs.cuda()
+        input = input.permute(0, 2, 3, 1).view(N, -1)
+        target = target.view(N)
+        loss = self.criterion(input[selected_pairs], target[selected_pairs])
+        return loss, selected_pairs.cpu().data.numpy()
+
+
 class CrossEntropyLoss(nn.Module):
     def __init__(self, weight):
         super(CrossEntropyLoss, self).__init__()
@@ -250,19 +321,6 @@ class SiameseNetwork(nn.Module):
         elif self.pooling == 'max':
             output = nn.MaxPool2d(output.size(2))(output)
         return output
-
-        # # cnn -> pooling -> cxn -> fc
-        # output = self.base.forward(x)
-        # if self.cnn:
-        #     output = self.cnn(output)
-        # if self.pooling == 'avg':
-        #     output = nn.AvgPool2d(output.size(2))(output)
-        # elif self.pooling == 'max':
-        #     output = nn.MaxPool2d(output.size(2))(output)
-        # feature = output
-        # if self.cxn:
-        #     output = self.cxn(output)
-        # return output, feature
 
     def forward(self, input1, input2):
         feature1 = self.forward_once(input1)
@@ -595,8 +653,8 @@ def get_transform(opt):
 
 # Routines for training
 def train(opt, net, dataloader, dataloader_val=None):
-    if opt.lambda_contrastive > 0:
-        criterion_constrastive = ContrastiveLoss()
+    # if opt.lambda_contrastive > 0:
+    #     criterion_constrastive = ContrastiveLoss()
     opt.save_dir = os.path.join(opt.checkpoint_dir, opt.name)
     if not os.path.exists(opt.save_dir):
         os.makedirs(opt.save_dir)
@@ -608,7 +666,8 @@ def train(opt, net, dataloader, dataloader_val=None):
             weight = weight.cuda()
     else:
         weight = None
-    criterion = CrossEntropyLoss(weight=weight)
+    pair_selector = RandomPairSelector(min_kept=opt.min_kept, max_kept=opt.max_kept)
+    criterion = OnlineCrossEntropyLoss(pair_selector=pair_selector)
 
     # optimizer
     if opt.finetune_fc_only:
@@ -623,6 +682,7 @@ def train(opt, net, dataloader, dataloader_val=None):
     dataset_size, dataset_size_val = opt.dataset_size, opt.dataset_size_val
     loss_history = []
     total_iter = 0
+    cnt_online = 0
     num_iter_per_epoch = math.ceil(dataset_size / opt.batch_size)
     opt.display_val_acc = not not dataloader_val
     loss_legend = []
@@ -646,7 +706,7 @@ def train(opt, net, dataloader, dataloader_val=None):
         target_train = []
 
         for i, data in enumerate(dataloader, 0):
-            img0, img1, label = data
+            img0, img1, label, lines = data
             if opt.use_gpu:
                 img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
             epoch_iter += 1
@@ -661,23 +721,15 @@ def train(opt, net, dataloader, dataloader_val=None):
             losses = {}
             # classification loss
             if opt.which_model != 'thesiamese':
-                this_loss = criterion(score, label)
+                this_loss, labeled_pairs = criterion(score, label)
                 loss += this_loss
                 losses['classification'] = this_loss.item()
+                cnt_online += len(labeled_pairs)
+                with open(os.path.join(opt.save_dir, opt.online_sourcefile), 'a') as f:
+                    for j in labeled_pairs:
+                        if int(lines[j].rstrip('\n').split()[2]) != 1:
+                            f.write(lines[j])
 
-            # contrastive loss
-            if opt.lambda_contrastive > 0:
-                # new label: 0 similar (1), 1 dissimilar (0, 2)
-                idx = label == 1
-                label_new = label.clone()
-                label_new[idx] = 0
-                label_new[1-idx] = 1
-                this_loss = criterion_constrastive(
-                    feat1.view(curr_batch_size, -1), feat2.view(curr_batch_size, -1), label_new.float()
-                    ) * opt.lambda_contrastive
-                loss += this_loss
-                losses['contrastive'] = this_loss.item()
-            
             # regularization
             if opt.lambda_regularization > 0:
                 reg1 = feat1.pow(2).mean()
@@ -685,8 +737,6 @@ def train(opt, net, dataloader, dataloader_val=None):
                 this_loss = (reg1 + reg2) * opt.lambda_regularization
                 loss += this_loss
                 losses['regularization'] = this_loss.item()
-            
-            # loss = loss_classification + loss_contrastive + loss_regularization
 
             # get predictions
             pred_train.append(get_prediction(score))
@@ -707,6 +757,15 @@ def train(opt, net, dataloader, dataloader_val=None):
                         win=opt.display_id
                     )
                 loss_history.append(loss.item())
+            
+            if total_iter % opt.save_latest_freq == 0:
+                torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
+                if opt.use_gpu:
+                    net.cuda()
+                if epoch % opt.save_epoch_freq == 0:
+                    torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
+                    if opt.use_gpu:
+                        net.cuda()
         
         curr_acc = {}
         # evaluate training
@@ -718,7 +777,7 @@ def train(opt, net, dataloader, dataloader_val=None):
             pred_val = []
             target_val = []
             for i, data in enumerate(dataloader_val, 0):
-                img0, img1, label = data
+                img0, img1, label, _ = data
                 if opt.use_gpu:
                     img0, img1 = img0.cuda(), img1.cuda()
                 _, _, output = net.forward(img0, img1)
@@ -740,37 +799,23 @@ def train(opt, net, dataloader, dataloader_val=None):
             sio.savemat(os.path.join(opt.save_dir, 'mat_loss'), plot_loss)
             sio.savemat(os.path.join(opt.save_dir, 'mat_acc'), plot_acc)
 
-        torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
-        if opt.use_gpu:
-            net.cuda()
-        if epoch % opt.save_epoch_freq == 0:
-            torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
-            if opt.use_gpu:
-                net.cuda()
+        # torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
+        # if opt.use_gpu:
+        #     net.cuda()
+        # if epoch % opt.save_epoch_freq == 0:
+        #     torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
+        #     if opt.use_gpu:
+        #         net.cuda()
 
     with open(os.path.join(opt.save_dir, 'loss.txt'), 'w') as f:
         for loss in loss_history:
             f.write(str(loss)+'\n')
+    
+    print('!!! #labeled pairs %d' % cnt_online)
 
 
 # Routines for testing
 def test(opt, net, dataloader):
-    # pred = []
-    # target = []
-    # acc = 0
-    # for i, data in enumerate(dataloader, 0):
-    #     img0, img1, label = data
-    #     if opt.use_gpu:
-    #         img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
-    #     _, _, output = net.forward(img0, img1)
-    #     target.append(label.cpu().detach().numpy().squeeze())
-    #     pred.append(output.cpu().detach().numpy().squeeze().argmax())
-    #     if target[-1] == pred[-1]:
-    #         acc += 1
-    #     print('--> image #%d: target %d   pred %d' % (i+1, target[-1], pred[-1]))
-
-    # print('================================================================================')
-    # print('accuracy: %.6f' % (100. * acc/len(pred)))
     dataset_size_val = opt.dataset_size_val
     pred_val = []
     target_val = []
