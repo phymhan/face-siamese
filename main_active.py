@@ -73,6 +73,8 @@ class Options():
         parser.add_argument('--max_kept', type=int, default=-1)
         parser.add_argument('--online_sourcefile', type=str, default='online.txt')
         parser.add_argument('--save_latest_freq', type=int, default=10, help='frequency of saving the latest results')
+        parser.add_argument('--pair_selector_type', type=str, default='random', help='[random] | hard | easy')
+        parser.add_argument('--serial_batches', action='store_true', help='if true, takes images in order to make batches, otherwise takes them randomly')
 
         return parser
 
@@ -212,16 +214,96 @@ class RandomPairSelector(PairSelector):
         return selected_inds
 
 
+class EmbeddingDistancePairSelector(PairSelector):
+    """
+    Selects easy pairs (pairs with largest distances)
+    """
+
+    def __init__(self, min_kept=0, max_kept=0, hard=True):
+        super(EmbeddingDistancePairSelector, self).__init__()
+        self._min_kept = min_kept
+        self._max_kept = max_kept
+        self._hard = hard  # if hard, pairs with smallest distances will be selected;
+                           # if not, pairs with largest distances will be selected.
+
+    def get_pairs(self, scores, embeddingA=None, embeddingB=None):
+        N = scores.size(0) * scores.size(2) * scores.size(3)
+        scores = scores.detach().cpu().data.numpy()
+        pred = scores.transpose((0, 2, 3, 1)).reshape(N, -1).argmax(axis=1)
+        valid_inds = np.where(pred != 1)[0]
+        invalid_inds = np.where(pred == 1)[0]
+
+        # compute square of distances
+        dist2 = (embeddingA.detach()-embeddingB.detach()).pow(2)
+        dist2 = dist2.cpu().data.numpy()
+        dist2 = dist2.transpose((0, 2, 3, 1)).reshape(N)
+        dist2_valid = dist2[valid_inds]
+        dist2_invalid = dist2[invalid_inds]
+
+        # print(dist2)
+        # print(pred)
+
+        valid_inds_sorted = valid_inds[dist2_valid.argsort()]
+        invalid_inds_sorted = invalid_inds[dist2_invalid.argsort()]
+        if not self._hard:
+            valid_inds_sorted = valid_inds_sorted[::-1]
+            invalid_inds_sorted = invalid_inds_sorted[::-1]
+
+        all_inds = np.concatenate((valid_inds_sorted, invalid_inds_sorted))
+        num_selected = min(max(len(valid_inds), self._min_kept), self._max_kept)
+        selected_inds = all_inds[:num_selected]
+        selected_inds = torch.LongTensor(selected_inds)
+        return selected_inds
+
+
+class SoftmaxPairSelector(PairSelector):
+    """
+    Selects hard pairs (pairs with lowest probability)
+    """
+
+    def __init__(self, min_kept=0, max_kept=0, hard=True):
+        super(SoftmaxPairSelector, self).__init__()
+        self._min_kept = min_kept
+        self._max_kept = max_kept
+        self._hard = hard  # if hard, pairs with lowest probability will be selected;
+                           # if not, pairs with highest probability will be selected.
+
+    def get_pairs(self, scores, embeddingA=None, embeddingB=None):
+        N = scores.size(0) * scores.size(2) * scores.size(3)
+        scores = scores.detach().cpu().permute((0, 2, 3, 1)).view(N, -1)
+        probs = torch.nn.functional.softmax(scores).data.numpy()
+        pred = scores.data.numpy().argmax(axis=1)
+        prob = probs[range(N), pred]
+        
+        valid_inds = np.where(pred != 1)[0]
+        invalid_inds = np.where(pred == 1)[0]
+
+        prob_valid = prob[valid_inds]
+        prob_invalid = prob[invalid_inds]
+
+        valid_inds_sorted = valid_inds[prob_valid.argsort()]
+        invalid_inds_sorted = invalid_inds[prob_invalid.argsort()]
+        if not self._hard:
+            valid_inds_sorted = valid_inds_sorted[::-1]
+            invalid_inds_sorted = invalid_inds_sorted[::-1]
+
+        all_inds = np.concatenate((valid_inds_sorted, invalid_inds_sorted))
+        num_selected = min(max(len(valid_inds), self._min_kept), self._max_kept)
+        selected_inds = all_inds[:num_selected]
+        selected_inds = torch.LongTensor(selected_inds)
+        return selected_inds
+
+
 class OnlineCrossEntropyLoss(nn.Module):
     def __init__(self, pair_selector=None):
         super(OnlineCrossEntropyLoss, self).__init__()
         self.pair_selector = pair_selector
         self.criterion = nn.CrossEntropyLoss(weight=None)
 
-    def __call__(self, input, target):
+    def __call__(self, input, target, embeddingA, embeddingB):
         N = input.size(0) * input.size(2) * input.size(3)
         target = target.reshape(input.size(0), 1, 1).expand(input.size(0), input.size(2), input.size(3))
-        selected_pairs = self.pair_selector.get_pairs(input, None, None)
+        selected_pairs = self.pair_selector.get_pairs(input, embeddingA, embeddingB)
         if input.is_cuda:
             selected_pairs = selected_pairs.cuda()
         input = input.permute(0, 2, 3, 1).view(N, -1)
@@ -651,6 +733,22 @@ def get_transform(opt):
     return transforms.Compose(transform_list)
 
 
+def get_pair_selector(opt):
+    if opt.pair_selector_type == 'random':
+        pair_selector = RandomPairSelector(min_kept=opt.min_kept, max_kept=opt.max_kept)
+    elif opt.pair_selector_type == 'hard':
+        pair_selector = EmbeddingDistancePairSelector(min_kept=opt.min_kept, max_kept=opt.max_kept, hard=True)
+    elif opt.pair_selector_type == 'easy':
+        pair_selector = EmbeddingDistancePairSelector(min_kept=opt.min_kept, max_kept=opt.max_kept, hard=False)
+    elif opt.pair_selector_type == 'softmax_hard':
+        pair_selector = SoftmaxPairSelector(min_kept=opt.min_kept, max_kept=opt.max_kept, hard=True)
+    elif opt.pair_selector_type == 'softmax_easy':
+        pair_selector = SoftmaxPairSelector(min_kept=opt.min_kept, max_kept=opt.max_kept, hard=False)
+    else:
+        raise NotImplementedError
+    return pair_selector
+
+
 # Routines for training
 def train(opt, net, dataloader, dataloader_val=None):
     # if opt.lambda_contrastive > 0:
@@ -666,7 +764,7 @@ def train(opt, net, dataloader, dataloader_val=None):
             weight = weight.cuda()
     else:
         weight = None
-    pair_selector = RandomPairSelector(min_kept=opt.min_kept, max_kept=opt.max_kept)
+    pair_selector = get_pair_selector(opt)
     criterion = OnlineCrossEntropyLoss(pair_selector=pair_selector)
 
     # optimizer
@@ -683,6 +781,7 @@ def train(opt, net, dataloader, dataloader_val=None):
     loss_history = []
     total_iter = 0
     cnt_online = 0
+    cnt_online_diff = 0
     num_iter_per_epoch = math.ceil(dataset_size / opt.batch_size)
     opt.display_val_acc = not not dataloader_val
     loss_legend = []
@@ -721,7 +820,7 @@ def train(opt, net, dataloader, dataloader_val=None):
             losses = {}
             # classification loss
             if opt.which_model != 'thesiamese':
-                this_loss, labeled_pairs = criterion(score, label)
+                this_loss, labeled_pairs = criterion(score, label, feat1, feat2)
                 loss += this_loss
                 losses['classification'] = this_loss.item()
                 cnt_online += len(labeled_pairs)
@@ -729,6 +828,7 @@ def train(opt, net, dataloader, dataloader_val=None):
                     for j in labeled_pairs:
                         if int(lines[j].rstrip('\n').split()[2]) != 1:
                             f.write(lines[j])
+                            cnt_online_diff += 1
 
             # regularization
             if opt.lambda_regularization > 0:
@@ -799,19 +899,11 @@ def train(opt, net, dataloader, dataloader_val=None):
             sio.savemat(os.path.join(opt.save_dir, 'mat_loss'), plot_loss)
             sio.savemat(os.path.join(opt.save_dir, 'mat_acc'), plot_acc)
 
-        # torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
-        # if opt.use_gpu:
-        #     net.cuda()
-        # if epoch % opt.save_epoch_freq == 0:
-        #     torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
-        #     if opt.use_gpu:
-        #         net.cuda()
-
     with open(os.path.join(opt.save_dir, 'loss.txt'), 'w') as f:
         for loss in loss_history:
             f.write(str(loss)+'\n')
     
-    print('!!! #labeled pairs %d' % cnt_online)
+    print('!!! #labeled pairs %d #diff labeld pairs %d, ratio %.2f%%' % (cnt_online, cnt_online_diff, cnt_online_diff/cnt_online*100))
 
 
 # Routines for testing
@@ -900,7 +992,7 @@ if __name__=='__main__':
     if opt.mode == 'train':
         # get dataloader
         dataset = SiameseNetworkDataset(opt.dataroot, opt.datafile, get_transform(opt))
-        dataloader = DataLoader(dataset, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
+        dataloader = DataLoader(dataset, shuffle=not opt.serial_batches, num_workers=opt.num_workers, batch_size=opt.batch_size)
         opt.dataset_size = len(dataset)
         # val dataset
         if opt.dataroot_val:

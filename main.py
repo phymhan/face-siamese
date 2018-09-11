@@ -69,6 +69,8 @@ class Options():
         parser.add_argument('--no_flip', action='store_true', help='if specified, do not flip the images for data augmentation')
         parser.add_argument('--continue_train', action='store_true')
         parser.add_argument('--epoch_count', type=int, default=1, help='starting epoch')
+        parser.add_argument('--save_latest_freq', type=int, default=10, help='frequency of saving the latest results')
+        parser.add_argument('--serial_batches', action='store_true', help='if true, takes images in order to make batches, otherwise takes them randomly')
 
         return parser
 
@@ -707,6 +709,15 @@ def train(opt, net, dataloader, dataloader_val=None):
                         win=opt.display_id
                     )
                 loss_history.append(loss.item())
+            
+            if total_iter % opt.save_latest_freq == 0:
+                torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, 'latest_net.pth'))
+                if opt.use_gpu:
+                    net.cuda()
+                if epoch % opt.save_epoch_freq == 0:
+                    torch.save(net.cpu().state_dict(), os.path.join(opt.save_dir, '{}_net.pth'.format(epoch)))
+                    if opt.use_gpu:
+                        net.cuda()
         
         curr_acc = {}
         # evaluate training
@@ -855,7 +866,7 @@ if __name__=='__main__':
     if opt.mode == 'train':
         # get dataloader
         dataset = SiameseNetworkDataset(opt.dataroot, opt.datafile, get_transform(opt))
-        dataloader = DataLoader(dataset, shuffle=True, num_workers=opt.num_workers, batch_size=opt.batch_size)
+        dataloader = DataLoader(dataset, shuffle=not opt.serial_batches, num_workers=opt.num_workers, batch_size=opt.batch_size)
         opt.dataset_size = len(dataset)
         # val dataset
         if opt.dataroot_val:
