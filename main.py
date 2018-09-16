@@ -55,7 +55,7 @@ class Options():
         parser.add_argument('--fc_relu_slope', type=float, default=0.5)
         parser.add_argument('--cnn_dim', type=int, nargs='+', default=[64, 1], help='cnn kernel dims for feature dimension reduction')
         parser.add_argument('--cnn_pad', type=int, default=1, help='padding of cnn layers defined by cnn_dim')
-        parser.add_argument('--cnn_relu_slope', type=float, default=0.5)
+        parser.add_argument('--cnn_relu_slope', type=float, default=0.8)
         parser.add_argument('--no_cxn', action='store_true', help='if true, do **not** add batchNorm and ReLU between cnn and fc')
         parser.add_argument('--lambda_regularization', type=float, default=0.0, help='weight for feature regularization loss')
         parser.add_argument('--lambda_contrastive', type=float, default=0.0, help='weight for contrastive loss')
@@ -238,6 +238,9 @@ class SiameseNetwork(nn.Module):
             nn.Conv2d(nf_prev, fc_dim[-1], kernel_size=1, stride=1, padding=0, bias=True)
         ]
         self.fc = nn.Sequential(*fc_blocks)
+        self.fc_shortcut = nn.Sequential(
+            nn.Conv2d(feature_dim, fc_dim[-1], kernel_size=1, stride=1, padding=0, bias=True)
+        )
         self.feature_dim = feature_dim
 
     def forward_once(self, x):
@@ -253,24 +256,11 @@ class SiameseNetwork(nn.Module):
             output = nn.MaxPool2d(output.size(2))(output)
         return output
 
-        # # cnn -> pooling -> cxn -> fc
-        # output = self.base.forward(x)
-        # if self.cnn:
-        #     output = self.cnn(output)
-        # if self.pooling == 'avg':
-        #     output = nn.AvgPool2d(output.size(2))(output)
-        # elif self.pooling == 'max':
-        #     output = nn.MaxPool2d(output.size(2))(output)
-        # feature = output
-        # if self.cxn:
-        #     output = self.cxn(output)
-        # return output, feature
-
     def forward(self, input1, input2):
         feature1 = self.forward_once(input1)
         feature2 = self.forward_once(input2)
         output = torch.cat((feature1, feature2), dim=1)
-        output = self.fc(output)
+        output = self.fc(output) + self.fc_shortcut(feature1-feature2)
         return feature1, feature2, output
     
     def load_pretrained(self, state_dict):
@@ -506,6 +496,15 @@ def get_prediction(score):
     return pred[0].reshape(batch_size)
 
 
+def set_requires_grad(nets, requires_grad=False):
+    if not isinstance(nets, list):
+        nets = [nets]
+    for net in nets:
+        if net is not None:
+            for param in net.parameters():
+                param.requires_grad = requires_grad
+
+
 ###############################################################################
 # Main Routines
 ###############################################################################
@@ -666,6 +665,21 @@ def train(opt, net, dataloader, dataloader_val=None):
                 this_loss = criterion(score, label)
                 loss += this_loss
                 losses['classification'] = this_loss.item()
+            
+            # K = 10
+            # label_cpu = label.cpu().data.numpy()
+            # lut_A = [0, 0, 1]
+            # lut_B = [1, 0, 0]
+            # S_A = [lut_A[l] for l in label_cpu]
+            # S_B = [lut_B[l] for l in label_cpu]
+            # S_A = torch.Tensor(S_A).cuda()
+            # S_B = torch.Tensor(S_B).cuda()
+            # prob = torch.nn.functional.softmax(score.view(score.size(0), -1))
+            # R_A = (feat1.view(-1) + K * (S_A - prob[:,0])).detach()
+            # R_B = (feat2.view(-1) + K * (S_B - prob[:,2])).detach()
+            # R_A.requires_grad = False
+            # R_B.requires_grad = False
+            # loss = loss + torch.mean((feat1.view(-1)-R_A).pow(2)) + torch.mean((feat2.view(-1)-R_B).pow(2))
 
             # contrastive loss
             if opt.lambda_contrastive > 0:
@@ -700,7 +714,7 @@ def train(opt, net, dataloader, dataloader_val=None):
             if total_iter % opt.print_freq == 0:
                 print("epoch %02d, iter %06d, loss: %.4f" % (epoch, total_iter, loss.item()))
                 if opt.display_id >= 0:
-                    plot_loss['X'].append(epoch+epoch_iter/num_iter_per_epoch)
+                    plot_loss['X'].append(epoch-1+epoch_iter/num_iter_per_epoch)
                     plot_loss['Y'].append([losses[k] for k in plot_loss['leg']])
                     vis.line(
                         X=np.stack([np.array(plot_loss['X'])] * len(plot_loss['leg']), 1),
@@ -766,22 +780,6 @@ def train(opt, net, dataloader, dataloader_val=None):
 
 # Routines for testing
 def test(opt, net, dataloader):
-    # pred = []
-    # target = []
-    # acc = 0
-    # for i, data in enumerate(dataloader, 0):
-    #     img0, img1, label = data
-    #     if opt.use_gpu:
-    #         img0, img1, label = img0.cuda(), img1.cuda(), label.cuda()
-    #     _, _, output = net.forward(img0, img1)
-    #     target.append(label.cpu().detach().numpy().squeeze())
-    #     pred.append(output.cpu().detach().numpy().squeeze().argmax())
-    #     if target[-1] == pred[-1]:
-    #         acc += 1
-    #     print('--> image #%d: target %d   pred %d' % (i+1, target[-1], pred[-1]))
-
-    # print('================================================================================')
-    # print('accuracy: %.6f' % (100. * acc/len(pred)))
     dataset_size_val = opt.dataset_size_val
     pred_val = []
     target_val = []

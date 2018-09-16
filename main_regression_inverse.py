@@ -57,7 +57,7 @@ class Options():
         parser.add_argument('--embedding_std', type=float, default=1)
         parser.add_argument('--cnn_dim', type=int, nargs='+', default=[64, 1], help='cnn kernel dims for feature dimension reduction')
         parser.add_argument('--cnn_pad', type=int, default=1, help='padding of cnn layers defined by cnn_dim')
-        parser.add_argument('--cnn_relu_slope', type=float, default=0.5)
+        parser.add_argument('--cnn_relu_slope', type=float, default=0.8)
         parser.add_argument('--transforms', type=str, default='resize_and_crop', help='scaling and cropping of images at load time [resize_and_crop|crop|scale_width|scale_width_and_crop]')
         parser.add_argument('--affineScale', nargs='+', type=float, default=[0.95, 1.05], help='scale tuple in transforms.RandomAffine')
         parser.add_argument('--affineDegrees', type=float, default=5, help='range of degrees in transforms.RandomAffine')
@@ -366,6 +366,15 @@ def get_accuracy(pred, target, delta):
     return acc.view(-1).numpy()
 
 
+def set_requires_grad(nets, requires_grad=False):
+    if not isinstance(nets, list):
+        nets = [nets]
+    for net in nets:
+        if net is not None:
+            for param in net.parameters():
+                param.requires_grad = requires_grad
+
+
 ###############################################################################
 # Main Routines
 ###############################################################################
@@ -502,7 +511,7 @@ def train(opt, net, decoder, dataloader):
             if total_iter % opt.print_freq == 0:
                 print("epoch %02d, iter %06d, loss: %.4f" % (epoch, total_iter, loss.item()))
                 if opt.display_id >= 0:
-                    plot_loss['X'].append(epoch + epoch_iter/num_iter_per_epoch)
+                    plot_loss['X'].append(epoch -1 + epoch_iter/num_iter_per_epoch)
                     plot_loss['Y'].append([losses[k] for k in plot_loss['leg']])
                     vis.line(
                         X=np.stack([np.array(plot_loss['X'])] * len(plot_loss['leg']), 1),
@@ -592,6 +601,7 @@ if __name__=='__main__':
 
     # get model
     net = get_model(opt)
+    set_requires_grad(net, False)
     opt.embedding_dim = net.feature_dim
     decoder = get_decoder(opt)
 
@@ -612,6 +622,7 @@ if __name__=='__main__':
         # train
         train(opt, net, decoder, dataloader)
     elif opt.mode == 'visualize':
+        set_requires_grad(decoder, False)
         # get dataloader
         dataset = SingleImageDataset(opt.dataroot, opt.datafile, transform=get_transform(opt))
         dataloader = DataLoader(dataset, shuffle=False, num_workers=0, batch_size=1)

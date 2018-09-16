@@ -467,7 +467,7 @@ def train(opt, net, dataloader):
             if total_iter % opt.print_freq == 0:
                 print("epoch %02d, iter %06d, loss: %.4f" % (epoch, total_iter, loss.item()))
                 if opt.display_id >= 0:
-                    plot_loss['X'].append(epoch + epoch_iter/num_iter_per_epoch)
+                    plot_loss['X'].append(epoch -1 + epoch_iter/num_iter_per_epoch)
                     plot_loss['Y'].append([losses[k] for k in plot_loss['leg']])
                     vis.line(
                         X=np.stack([np.array(plot_loss['X'])] * len(plot_loss['leg']), 1),
