@@ -58,7 +58,7 @@ class Options():
         parser.add_argument('--cnn_dim', type=int, nargs='+', default=[64, 1], help='cnn kernel dims for feature dimension reduction')
         parser.add_argument('--cnn_pad', type=int, default=1, help='padding of cnn layers defined by cnn_dim')
         parser.add_argument('--cnn_relu_slope', type=float, default=0.8)
-        parser.add_argument('--transforms', type=str, default='resize_and_crop', help='scaling and cropping of images at load time [resize_and_crop|crop|scale_width|scale_width_and_crop]')
+        parser.add_argument('--transforms', type=str, default='resize_affine_crop', help='scaling and cropping of images at load time [resize_and_crop|crop|scale_width|scale_width_and_crop]')
         parser.add_argument('--affineScale', nargs='+', type=float, default=[0.95, 1.05], help='scale tuple in transforms.RandomAffine')
         parser.add_argument('--affineDegrees', type=float, default=5, help='range of degrees in transforms.RandomAffine')
         parser.add_argument('--use_color_jitter', action='store_true', help='if specified, add color jitter in transforms')
@@ -477,7 +477,7 @@ def train(opt, net, decoder, dataloader):
         plot_loss = {'X': [], 'Y': [], 'leg': loss_legend}
         plot_acc = {'X': [], 'Y': [], 'leg': ['train', 'val'] if opt.display_val_acc else ['train']}
 
-    for epoch in range(1, opt.num_epochs+1):
+    for epoch in range(opt.epoch_count, opt.num_epochs+opt.epoch_count):
         epoch_iter = 0
         acc_train = []
 

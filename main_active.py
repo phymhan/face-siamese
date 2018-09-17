@@ -43,7 +43,7 @@ class Options():
         parser.add_argument('--which_model', type=str, default='resnet18', help='which model')
         parser.add_argument('--n_layers', type=int, default=3, help='only used if which_model==n_layers')
         parser.add_argument('--nf', type=int, default=64, help='# of filters in first conv layer')
-        parser.add_argument('--pooling', type=str, default='max', help='empty: no pooling layer, max: MaxPool, avg: AvgPool')
+        parser.add_argument('--pooling', type=str, default='avg', help='empty: no pooling layer, max: MaxPool, avg: AvgPool')
         parser.add_argument('--loadSize', type=int, default=224, help='scale images to this size')
         parser.add_argument('--fineSize', type=int, default=224, help='scale images to this size')
         parser.add_argument('--gpu_ids', type=str, default='0', help='gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU')
@@ -55,14 +55,14 @@ class Options():
         parser.add_argument('--fc_relu_slope', type=float, default=0.5)
         parser.add_argument('--cnn_dim', type=int, nargs='+', default=[64, 1], help='cnn kernel dims for feature dimension reduction')
         parser.add_argument('--cnn_pad', type=int, default=1, help='padding of cnn layers defined by cnn_dim')
-        parser.add_argument('--cnn_relu_slope', type=float, default=0.5)
+        parser.add_argument('--cnn_relu_slope', type=float, default=0.8)
         parser.add_argument('--no_cxn', action='store_true', help='if true, do **not** add batchNorm and ReLU between cnn and fc')
         parser.add_argument('--lambda_regularization', type=float, default=0.0, help='weight for feature regularization loss')
         parser.add_argument('--lambda_contrastive', type=float, default=0.0, help='weight for contrastive loss')
         parser.add_argument('--print_freq', type=int, default=50, help='print loss every print_freq iterations')
         parser.add_argument('--display_id', type=int, default=1, help='visdom window id, to disable visdom set id = -1.')
         parser.add_argument('--display_port', type=int, default=8097)
-        parser.add_argument('--transforms', type=str, default='resize_and_crop', help='scaling and cropping of images at load time [resize_and_crop|crop|scale_width|scale_width_and_crop]')
+        parser.add_argument('--transforms', type=str, default='resize_affine_crop', help='scaling and cropping of images at load time [resize_and_crop|crop|scale_width|scale_width_and_crop]')
         parser.add_argument('--affineScale', nargs='+', type=float, default=[0.95, 1.05], help='scale tuple in transforms.RandomAffine')
         parser.add_argument('--affineDegrees', type=float, default=5, help='range of degrees in transforms.RandomAffine')
         parser.add_argument('--use_color_jitter', action='store_true', help='if specified, add color jitter in transforms')
@@ -799,7 +799,7 @@ def train(opt, net, dataloader, dataloader_val=None):
         plot_acc = {'X': [], 'Y': [], 'leg': ['train', 'val'] if opt.display_val_acc else ['train']}
     
     # start training
-    for epoch in range(1, opt.num_epochs+1):
+    for epoch in range(opt.epoch_count, opt.num_epochs+opt.epoch_count):
         epoch_iter = 0
         pred_train = []
         target_train = []
